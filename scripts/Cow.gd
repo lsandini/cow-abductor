@@ -38,6 +38,12 @@ var _saucer: Node3D = null
 # cow walk over hills and valleys and land back on the slope after a near-miss.
 var ground_sampler: Callable
 
+# Supplied by the World: a shared, baked moo sample. If set, the cow gets its
+# own 3D audio player and moos occasionally (and panics when beamed).
+var moo_stream: AudioStream
+var _moo_player: AudioStreamPlayer3D
+var _moo_timer: float = 0.0
+
 # Wander state machine.
 var _grazing: bool = true
 var _heading: Vector3 = Vector3.FORWARD
@@ -51,14 +57,39 @@ func _ready() -> void:
 	_size = randf_range(0.88, 1.12)
 	scale = Vector3.ONE * _size
 	_build_body()
+	_build_audio()
 	_pick_new_action()
 	_wander_timer = randf() * 3.0   # stagger cows so they don't all turn in sync
 
 
+# Give the cow a 3D voice if the World provided a moo sample.
+func _build_audio() -> void:
+	if moo_stream == null:
+		return
+	_moo_player = AudioStreamPlayer3D.new()
+	_moo_player.stream = moo_stream
+	_moo_player.volume_db = -3.0
+	_moo_player.max_distance = 80.0
+	_moo_player.unit_size = 12.0
+	_moo_player.position.y = 1.1   # roughly at the cow's head
+	add_child(_moo_player)
+	_moo_timer = randf_range(4.0, 18.0)   # first moo is staggered
+
+
 # Called by the saucer each frame: are we in the beam, and which saucer is it?
 func set_pulled(pulled: bool, saucer: Node3D) -> void:
+	if pulled and not _pulled:
+		_moo(true)   # just got grabbed -> a startled, higher-pitched moo
 	_pulled = pulled
 	_saucer = saucer
+
+
+# Play the moo. `panic` raises the pitch for the abduction yelp.
+func _moo(panic: bool) -> void:
+	if _moo_player == null:
+		return
+	_moo_player.pitch_scale = randf_range(1.3, 1.6) if panic else randf_range(0.85, 1.12)
+	_moo_player.play()
 
 
 func _physics_process(delta: float) -> void:
@@ -76,6 +107,17 @@ func _physics_process(delta: float) -> void:
 		_wander(delta)
 		position.y = _ground_y()      # hug the terrain as it grazes / walks
 		_orient_on_slope(delta)       # and tilt to match the slope underfoot
+		_tick_moo(delta)              # occasional contented moo
+
+
+# Count down to the next idle moo while grazing/walking.
+func _tick_moo(delta: float) -> void:
+	if _moo_player == null:
+		return
+	_moo_timer -= delta
+	if _moo_timer <= 0.0:
+		_moo(false)
+		_moo_timer = randf_range(12.0, 28.0)
 
 
 # Terrain height under the cow right now (falls back to 0 if no sampler set).

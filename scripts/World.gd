@@ -41,6 +41,10 @@ const HORIZON_COLOR := Color(0.74, 0.80, 0.86)
 var _captured_count: int = 0           # running tally of abducted cows
 var _hud_label: Label                  # top-left status text
 var _terrain := FastNoiseLite.new()    # the single source of truth for ground height
+# Preloaded rather than referenced by class_name so the type always resolves,
+# even before the editor has rescanned and registered the global class.
+const GameAudioScript := preload("res://scripts/Audio.gd")
+var _audio: GameAudioScript            # procedural sound (whistle, birds, moos)
 
 
 func _ready() -> void:
@@ -50,8 +54,10 @@ func _ready() -> void:
 	_build_environment()
 	_build_sun()
 	_build_ground()
+	_build_audio()                     # bakes the moo/bird samples; starts the whistle
 	_spawn_trees()
-	_spawn_cows()
+	_audio.setup_birds()               # attach bird emitters now that trees exist
+	_spawn_cows()                      # cows pick up the shared moo sample
 	_build_saucer()
 	_build_ui()
 
@@ -366,6 +372,7 @@ func _spawn_one_cow() -> void:
 	cow.area_half = area_half
 	# Hand the cow the height sampler so it can walk over hills and valleys.
 	cow.ground_sampler = Callable(self, "get_height")
+	cow.moo_stream = _audio.moo_stream   # shared baked moo sample
 	var pos := _random_ground_position()
 	pos.y = get_height(pos.x, pos.z)
 	cow.position = pos
@@ -379,6 +386,15 @@ func _on_cow_captured() -> void:
 	_captured_count += 1
 	_update_hud()
 	_spawn_one_cow()   # keep the world populated — there is no "running out".
+
+
+# -----------------------------------------------------------------------------
+# Audio: the procedural sound manager (UFO whistle, birds, baked moo sample).
+# -----------------------------------------------------------------------------
+func _build_audio() -> void:
+	_audio = GameAudioScript.new()
+	_audio.name = "Audio"
+	add_child(_audio)
 
 
 # -----------------------------------------------------------------------------
