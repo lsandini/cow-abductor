@@ -1,0 +1,15 @@
+[gd_scene load_steps=2 format=3]
+
+; ----------------------------------------------------------------------------
+; Main.tscn — the game's entry scene.
+;
+; Intentionally tiny: it is just an empty Node3D carrying World.gd. That script
+; procedurally builds the entire game world (environment, ground, lighting,
+; saucer, cows, trees and the UI) when the scene loads. Keeping the scene file
+; minimal makes the project easy to read and edit purely from GDScript.
+; ----------------------------------------------------------------------------
+
+[ext_resource type="Script" path="res://scripts/World.gd" id="1_world"]
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1_world")

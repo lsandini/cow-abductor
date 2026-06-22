@@ -1,0 +1,277 @@
+# =============================================================================
+# Cow.gd  (class_name Cow)
+#
+# A single cow. It has two jobs:
+#   1. WANDER: lazily graze and walk around the pasture on its own.
+#   2. GET ABDUCTED: when the saucer's beam is over it, rise up, spin, and
+#      vanish into the saucer (emitting `captured` so the World can score it).
+#
+# If the beam moves away before the cow reaches the saucer, the cow gently
+# falls back down and resumes wandering. The cow's body is built from
+# primitives in _ready(), so no scene file is needed.
+# =============================================================================
+class_name Cow
+extends Node3D
+
+# Emitted the moment the cow is pulled fully into the saucer (just before it is
+# freed). The World listens to this to update the score and respawn a cow.
+signal captured
+
+# --- Wandering tuning --------------------------------------------------------
+@export var wander_speed: float = 2.2      # walking speed (m/s)
+@export var turn_speed: float = 6.0        # how quickly it rotates to face travel
+var area_half: float = 180.0               # stay within +/- this on X and Z (set by World)
+
+# --- Abduction tuning --------------------------------------------------------
+@export var pull_rise: float = 6.0         # vertical lift speed inside the beam
+@export var pull_lateral: float = 4.0      # how fast it centres under the saucer
+@export var spin_speed: float = 8.0        # whirl while being lifted (rad/s)
+@export var fall_speed: float = 12.0       # drop speed if the beam lets go
+@export var capture_distance: float = 1.6  # close enough to the saucer = captured
+
+# Beam state, refreshed every frame by the saucer via set_pulled().
+var _pulled: bool = false
+var _saucer: Node3D = null
+
+# Supplied by the World: ground_sampler.call(x, z) -> terrain height. Lets the
+# cow walk over hills and valleys and land back on the slope after a near-miss.
+var ground_sampler: Callable
+
+# Wander state machine.
+var _grazing: bool = true
+var _heading: Vector3 = Vector3.FORWARD
+var _wander_timer: float = 0.0
+var _size: float = 1.0   # this cow's uniform scale (re-applied when we set the basis)
+
+
+func _ready() -> void:
+	# A little per-cow size variation so the herd doesn't look cloned. Scaling
+	# about the origin keeps the hooves planted on the ground (lowest point y=0).
+	_size = randf_range(0.88, 1.12)
+	scale = Vector3.ONE * _size
+	_build_body()
+	_pick_new_action()
+	_wander_timer = randf() * 3.0   # stagger cows so they don't all turn in sync
+
+
+# Called by the saucer each frame: are we in the beam, and which saucer is it?
+func set_pulled(pulled: bool, saucer: Node3D) -> void:
+	_pulled = pulled
+	_saucer = saucer
+
+
+func _physics_process(delta: float) -> void:
+	if _pulled and _saucer != null:
+		_ride_beam(delta)
+		return
+
+	var ground_y := _ground_y()
+	if position.y > ground_y + 0.05:
+		# Not in the beam but still airborne -> fall back down onto the terrain,
+		# already easing toward the slope so it lands aligned.
+		position.y = move_toward(position.y, ground_y, fall_speed * delta)
+		_orient_on_slope(delta)
+	else:
+		_wander(delta)
+		position.y = _ground_y()      # hug the terrain as it grazes / walks
+		_orient_on_slope(delta)       # and tilt to match the slope underfoot
+
+
+# Terrain height under the cow right now (falls back to 0 if no sampler set).
+func _ground_y() -> float:
+	if ground_sampler.is_valid():
+		return ground_sampler.call(position.x, position.z)
+	return 0.0
+
+
+# Approximate the ground's upward normal under the cow via central differences
+# on the height sampler. Used to tilt the cow onto the slope.
+func _ground_normal() -> Vector3:
+	if not ground_sampler.is_valid():
+		return Vector3.UP
+	var e := 1.0
+	var x := position.x
+	var z := position.z
+	var hl: float = ground_sampler.call(x - e, z)
+	var hr: float = ground_sampler.call(x + e, z)
+	var hd: float = ground_sampler.call(x, z - e)
+	var hu: float = ground_sampler.call(x, z + e)
+	return Vector3(hl - hr, 2.0 * e, hd - hu).normalized()
+
+
+# Smoothly orient the cow so its "up" matches the slope normal while it keeps
+# facing its heading. We rebuild the rotation basis (up = normal, forward =
+# heading flattened onto the slope) and slerp toward it, then re-apply the cow's
+# uniform scale (setting basis directly would otherwise wipe it out).
+func _orient_on_slope(delta: float) -> void:
+	var n := _ground_normal()
+
+	# Project the heading onto the slope plane so "forward" lies along the ground.
+	var fwd := _heading - n * _heading.dot(n)
+	if fwd.length() < 0.001:
+		return
+	fwd = fwd.normalized()
+
+	var right := n.cross(fwd).normalized()      # right-handed: x = up x forward
+	var target := Basis(right, n, fwd)          # columns map local X/Y/Z axes
+	var current := transform.basis.orthonormalized()
+	var blended := current.slerp(target, clampf(turn_speed * delta, 0.0, 1.0))
+	transform.basis = blended.scaled(Vector3.ONE * _size)
+
+
+# --- Being abducted ----------------------------------------------------------
+func _ride_beam(delta: float) -> void:
+	var target := _saucer.global_position
+
+	# Slide horizontally toward the saucer's centre and rise toward it.
+	global_position.x = lerp(global_position.x, target.x, clamp(pull_lateral * delta, 0.0, 1.0))
+	global_position.z = lerp(global_position.z, target.z, clamp(pull_lateral * delta, 0.0, 1.0))
+	global_position.y = move_toward(global_position.y, target.y, pull_rise * delta)
+
+	# Helpless spinning + a little wobble for comedic effect.
+	rotate_y(spin_speed * delta)
+	rotation.z = lerp(rotation.z, 0.5, delta * 3.0)
+
+	if global_position.distance_to(target) <= capture_distance:
+		captured.emit()
+		queue_free()
+
+
+# --- Wandering ---------------------------------------------------------------
+func _wander(delta: float) -> void:
+	_wander_timer -= delta
+	if _wander_timer <= 0.0:
+		_pick_new_action()
+
+	if _grazing:
+		return   # standing still, head down, eating grass
+
+	# Walk in the current heading and keep inside the pasture. Facing/turning is
+	# handled by _orient_on_slope, which also tilts the cow onto the terrain.
+	position += _heading * wander_speed * delta
+	_keep_in_bounds()
+
+
+# Randomly decide whether to graze or stroll, and for how long.
+func _pick_new_action() -> void:
+	_grazing = randf() < 0.4
+	_wander_timer = randf_range(2.0, 5.0)
+	if not _grazing:
+		var angle := randf() * TAU
+		_heading = Vector3(cos(angle), 0.0, sin(angle))
+
+
+# Turn back toward the centre if a cow strays past the spawn area edge.
+func _keep_in_bounds() -> void:
+	if absf(position.x) > area_half or absf(position.z) > area_half:
+		_heading = (-position).normalized()
+		_heading.y = 0.0
+	position.x = clampf(position.x, -area_half, area_half)
+	position.z = clampf(position.z, -area_half, area_half)
+
+
+# -----------------------------------------------------------------------------
+# Visual construction.
+#
+# Built entirely from rounded primitives (capsules, spheres, cones) so the cow
+# reads as a soft, cartoony animal rather than a stack of blocks — but it is
+# still simple, low-part-count and clearly "game art".
+#
+# Convention: +Z is the cow's FORWARD (head end), -Z is the tail. The model's
+# lowest point sits at y = 0 so the cow rests on the ground.
+# -----------------------------------------------------------------------------
+func _build_body() -> void:
+	var hide := _solid_material(Color(0.94, 0.92, 0.88))   # creamy white coat
+	var black := _solid_material(Color(0.12, 0.12, 0.13))  # spots, hooves
+	var pink := _solid_material(Color(0.95, 0.62, 0.64))   # muzzle, ears, udder
+	var horn := _solid_material(Color(0.85, 0.80, 0.68))   # pale horns
+
+	# Barrel torso: a capsule laid horizontally along Z, slightly squashed.
+	_add_part(_capsule(0.47, 1.7), hide, Vector3(0, 0.98, -0.05),
+			Vector3(90, 0, 0), Vector3(1.05, 0.95, 1.0))
+
+	# Spot patches: flattened spheres pressed into the coat so they bulge like
+	# real markings instead of sitting flat. The squashed axis is the surface
+	# normal, so each one hugs the rounded body.
+	_add_part(_sphere(0.30), black, Vector3(0.40, 1.10, 0.20), Vector3.ZERO, Vector3(0.45, 1.1, 1.2))
+	_add_part(_sphere(0.26), black, Vector3(-0.42, 0.95, -0.15), Vector3.ZERO, Vector3(0.45, 1.0, 1.0))
+	_add_part(_sphere(0.24), black, Vector3(-0.10, 1.40, -0.30), Vector3.ZERO, Vector3(1.1, 0.45, 1.0))
+	_add_part(_sphere(0.22), black, Vector3(0.30, 1.05, -0.55), Vector3.ZERO, Vector3(0.9, 0.9, 0.5))
+
+	# Neck: a short capsule bridging the shoulders up to the head.
+	_add_part(_capsule(0.27, 0.7), hide, Vector3(0, 1.12, 0.62), Vector3(58, 0, 0))
+
+	# Head: an elongated sphere reaching forward.
+	_add_part(_sphere(0.34), hide, Vector3(0, 1.34, 0.92), Vector3.ZERO, Vector3(0.88, 0.9, 1.1))
+
+	# Muzzle: a soft pink snout at the very front.
+	_add_part(_sphere(0.24), pink, Vector3(0, 1.22, 1.20), Vector3.ZERO, Vector3(1.0, 0.78, 0.7))
+
+	# Ears: flattened spheres angled out from the sides of the head.
+	_add_part(_sphere(0.14), hide, Vector3(0.30, 1.46, 0.86), Vector3(0, 0, -35), Vector3(1.5, 0.5, 0.9))
+	_add_part(_sphere(0.14), hide, Vector3(-0.30, 1.46, 0.86), Vector3(0, 0, 35), Vector3(1.5, 0.5, 0.9))
+
+	# Horns: little pale cones on top of the head, tilted outward.
+	_add_part(_cone(0.06, 0.20), horn, Vector3(0.16, 1.62, 0.86), Vector3(0, 0, -25))
+	_add_part(_cone(0.06, 0.20), horn, Vector3(-0.16, 1.62, 0.86), Vector3(0, 0, 25))
+
+	# Four tapered legs, each capped with a dark hoof.
+	for x in [-0.30, 0.30]:
+		for z in [-0.45, 0.48]:
+			_add_part(_cylinder(0.13, 0.09, 0.78), hide, Vector3(x, 0.42, z))
+			_add_part(_cylinder(0.11, 0.11, 0.14), black, Vector3(x, 0.07, z))
+
+	# Udder under the belly toward the back.
+	_add_part(_sphere(0.20), pink, Vector3(0, 0.66, -0.30), Vector3.ZERO, Vector3(1.1, 0.8, 1.2))
+
+	# Tail: a thin drooping cylinder off the rump with a dark tuft on the end.
+	_add_part(_cylinder(0.05, 0.04, 0.6), hide, Vector3(0, 0.80, -0.92), Vector3(28, 0, 0))
+	_add_part(_sphere(0.09), black, Vector3(0, 0.52, -1.08))
+
+
+# --- Mesh + part helpers -----------------------------------------------------
+
+# Add a mesh instance as a child with a full local transform.
+func _add_part(mesh: Mesh, material: StandardMaterial3D, pos: Vector3,
+		rot_deg: Vector3 = Vector3.ZERO, part_scale: Vector3 = Vector3.ONE) -> void:
+	var inst := MeshInstance3D.new()
+	inst.mesh = mesh
+	inst.material_override = material
+	inst.position = pos
+	inst.rotation_degrees = rot_deg
+	inst.scale = part_scale
+	add_child(inst)
+
+
+func _capsule(radius: float, height: float) -> CapsuleMesh:
+	var mesh := CapsuleMesh.new()
+	mesh.radius = radius
+	mesh.height = height
+	return mesh
+
+
+func _sphere(radius: float) -> SphereMesh:
+	var mesh := SphereMesh.new()
+	mesh.radius = radius
+	mesh.height = radius * 2.0   # a full sphere (not a half dome)
+	return mesh
+
+
+func _cylinder(top_radius: float, bottom_radius: float, height: float) -> CylinderMesh:
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = top_radius
+	mesh.bottom_radius = bottom_radius
+	mesh.height = height
+	return mesh
+
+
+# A cone is just a cylinder whose top radius is zero.
+func _cone(base_radius: float, height: float) -> CylinderMesh:
+	return _cylinder(0.0, base_radius, height)
+
+
+func _solid_material(color: Color) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mat.roughness = 0.85   # soft, matte coat — no plastic shine
+	return mat

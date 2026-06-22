@@ -4,3 +4,7 @@
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Movie Maker output / recordings
+*.avi
+*.mp4
