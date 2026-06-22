@@ -1,3 +1,4 @@
+
 # =============================================================================
 # Cow.gd  (class_name Cow)
 #
@@ -181,13 +182,13 @@ func _keep_in_bounds() -> void:
 # lowest point sits at y = 0 so the cow rests on the ground.
 # -----------------------------------------------------------------------------
 func _build_body() -> void:
-	var hide := _solid_material(Color(0.94, 0.92, 0.88))   # creamy white coat
+	var coat := _solid_material(Color(0.94, 0.92, 0.88))   # creamy white coat
 	var black := _solid_material(Color(0.12, 0.12, 0.13))  # spots, hooves
 	var pink := _solid_material(Color(0.95, 0.62, 0.64))   # muzzle, ears, udder
 	var horn := _solid_material(Color(0.85, 0.80, 0.68))   # pale horns
 
 	# Barrel torso: a capsule laid horizontally along Z, slightly squashed.
-	_add_part(_capsule(0.47, 1.7), hide, Vector3(0, 0.98, -0.05),
+	_add_part(_capsule(0.47, 1.7), coat, Vector3(0, 0.98, -0.05),
 			Vector3(90, 0, 0), Vector3(1.05, 0.95, 1.0))
 
 	# Spot patches: flattened spheres pressed into the coat so they bulge like
@@ -199,17 +200,17 @@ func _build_body() -> void:
 	_add_part(_sphere(0.22), black, Vector3(0.30, 1.05, -0.55), Vector3.ZERO, Vector3(0.9, 0.9, 0.5))
 
 	# Neck: a short capsule bridging the shoulders up to the head.
-	_add_part(_capsule(0.27, 0.7), hide, Vector3(0, 1.12, 0.62), Vector3(58, 0, 0))
+	_add_part(_capsule(0.27, 0.7), coat, Vector3(0, 1.12, 0.62), Vector3(58, 0, 0))
 
 	# Head: an elongated sphere reaching forward.
-	_add_part(_sphere(0.34), hide, Vector3(0, 1.34, 0.92), Vector3.ZERO, Vector3(0.88, 0.9, 1.1))
+	_add_part(_sphere(0.34), coat, Vector3(0, 1.34, 0.92), Vector3.ZERO, Vector3(0.88, 0.9, 1.1))
 
 	# Muzzle: a soft pink snout at the very front.
 	_add_part(_sphere(0.24), pink, Vector3(0, 1.22, 1.20), Vector3.ZERO, Vector3(1.0, 0.78, 0.7))
 
 	# Ears: flattened spheres angled out from the sides of the head.
-	_add_part(_sphere(0.14), hide, Vector3(0.30, 1.46, 0.86), Vector3(0, 0, -35), Vector3(1.5, 0.5, 0.9))
-	_add_part(_sphere(0.14), hide, Vector3(-0.30, 1.46, 0.86), Vector3(0, 0, 35), Vector3(1.5, 0.5, 0.9))
+	_add_part(_sphere(0.14), coat, Vector3(0.30, 1.46, 0.86), Vector3(0, 0, -35), Vector3(1.5, 0.5, 0.9))
+	_add_part(_sphere(0.14), coat, Vector3(-0.30, 1.46, 0.86), Vector3(0, 0, 35), Vector3(1.5, 0.5, 0.9))
 
 	# Horns: little pale cones on top of the head, tilted outward.
 	_add_part(_cone(0.06, 0.20), horn, Vector3(0.16, 1.62, 0.86), Vector3(0, 0, -25))
@@ -218,14 +219,14 @@ func _build_body() -> void:
 	# Four tapered legs, each capped with a dark hoof.
 	for x in [-0.30, 0.30]:
 		for z in [-0.45, 0.48]:
-			_add_part(_cylinder(0.13, 0.09, 0.78), hide, Vector3(x, 0.42, z))
+			_add_part(_cylinder(0.13, 0.09, 0.78), coat, Vector3(x, 0.42, z))
 			_add_part(_cylinder(0.11, 0.11, 0.14), black, Vector3(x, 0.07, z))
 
 	# Udder under the belly toward the back.
 	_add_part(_sphere(0.20), pink, Vector3(0, 0.66, -0.30), Vector3.ZERO, Vector3(1.1, 0.8, 1.2))
 
 	# Tail: a thin drooping cylinder off the rump with a dark tuft on the end.
-	_add_part(_cylinder(0.05, 0.04, 0.6), hide, Vector3(0, 0.80, -0.92), Vector3(28, 0, 0))
+	_add_part(_cylinder(0.05, 0.04, 0.6), coat, Vector3(0, 0.80, -0.92), Vector3(28, 0, 0))
 	_add_part(_sphere(0.09), black, Vector3(0, 0.52, -1.08))
 
 

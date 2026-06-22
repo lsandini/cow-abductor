@@ -45,17 +45,17 @@ func _draw() -> void:
 		return
 
 	var origin := saucer.global_position
-	var scale := radius / view_range   # world metres -> radar pixels
+	var map_scale := radius / view_range   # world metres -> radar pixels
 
 	# Trees first (so cows draw on top of them).
 	for tree in get_tree().get_nodes_in_group("trees"):
-		var p := _world_to_map(tree.global_position, origin, scale, center)
+		var p := _world_to_map(tree.global_position, origin, map_scale, center)
 		if p.distance_to(center) <= radius:
 			draw_circle(p, 1.5, TREE_COLOR)
 
 	# Cows: clamp stragglers to the rim so the player always sees a bearing.
 	for cow in get_tree().get_nodes_in_group("cows"):
-		var p := _world_to_map(cow.global_position, origin, scale, center)
+		var p := _world_to_map(cow.global_position, origin, map_scale, center)
 		var offset := p - center
 		if offset.length() > radius:
 			offset = offset.normalized() * radius
@@ -64,7 +64,7 @@ func _draw() -> void:
 
 	# Beam reach ring (only while the beam is active).
 	if saucer.beam_active:
-		draw_arc(center, saucer.beam_radius * scale, 0.0, TAU, 24, BEAM_COLOR, 1.5)
+		draw_arc(center, saucer.beam_radius * map_scale, 0.0, TAU, 24, BEAM_COLOR, 1.5)
 
 	# The saucer itself: a heading arrow at the centre.
 	_draw_arrow(center, saucer.get_planar_forward(), SAUCER_COLOR)
@@ -72,10 +72,10 @@ func _draw() -> void:
 
 # Convert a world position into a radar pixel position (north-up).
 # World X maps to map X; world Z maps to map Y (down = +Z / south).
-func _world_to_map(world_pos: Vector3, origin: Vector3, scale: float, center: Vector2) -> Vector2:
+func _world_to_map(world_pos: Vector3, origin: Vector3, map_scale: float, center: Vector2) -> Vector2:
 	var dx := world_pos.x - origin.x
 	var dz := world_pos.z - origin.z
-	return center + Vector2(dx, dz) * scale
+	return center + Vector2(dx, dz) * map_scale
 
 
 # Draw a small triangle at `center` pointing along the 2D direction `dir`.

@@ -79,7 +79,9 @@ func _setup_input() -> void:
 
 
 # Helper: create a single-key action if it does not already exist.
-func _add_key_action(action: String, physical_key: int) -> void:
+# physical_key is typed as the Key enum so it flows into physical_keycode
+# (also a Key) without an int->enum conversion warning.
+func _add_key_action(action: String, physical_key: Key) -> void:
 	if not InputMap.has_action(action):
 		InputMap.add_action(action)
 	var ev := InputEventKey.new()
