@@ -23,8 +23,17 @@ extends Node3D
 @export var min_pitch: float = -1.3        # how far down the camera can look (rad)
 @export var max_pitch: float = -0.1        # how far up the camera can look (rad)
 
+# --- Camera zoom (mouse wheel) -----------------------------------------------
+@export var zoom_min: float = 6.0          # closest the camera can pull in
+@export var zoom_max: float = 26.0         # furthest the camera can pull out
+@export var zoom_step: float = 1.5         # distance changed per wheel notch
+var _cam_distance: float = 14.0            # current camera boom length (starts at default)
+
 # --- Tractor beam tuning -----------------------------------------------------
 @export var beam_radius: float = 6.0       # ground radius the beam can grab within
+@export var beam_ring_count: int = 6       # how many light rings travel down the beam at once
+@export var beam_ring_speed: float = 0.4   # how fast a ring slides top->bottom (cycles/sec)
+@export var beam_ring_color: Color = Color(0.5, 0.95, 1.0, 0.9)  # rgb tint; a = peak brightness
 
 # Supplied by the World: ground_sampler.call(x, z) -> terrain height. Used to
 # keep the saucer at a steady altitude above the ground directly beneath it.
@@ -39,8 +48,14 @@ var _camera: Camera3D
 var _pitch: float = -0.6                    # current camera pitch angle (rad)
 
 var _body: Node3D                           # the visible saucer mesh (banks when moving)
-var _beam: MeshInstance3D                   # the cone of light, shown while beaming
+var _beam: Node3D                           # container for the travelling beam rings
+var _rings: Array[MeshInstance3D] = []      # the pool of light rings cycled down the beam
+var _ring_t: float = 0.0                    # shared phase [0,1); ring i is offset by i/count
 var beam_active: bool = false               # read by the minimap to draw the beam ring
+
+# Base ring radius of the unscaled torus mesh; each ring is scaled in X/Z from this
+# to match the cone's radius at its current height. Kept in sync with _build_beam().
+const _RING_BASE_RADIUS: float = 0.94
 
 
 func _ready() -> void:
@@ -59,6 +74,33 @@ func _ready() -> void:
 func _physics_process(delta: float) -> void:
 	_handle_movement(delta)
 	_handle_beam()
+
+
+# Visuals tick every rendered frame (not the fixed physics step) so the rings
+# slide smoothly. They only move while the beam is firing.
+func _process(delta: float) -> void:
+	if not beam_active:
+		return
+	# Advance the shared phase; each ring reads it with its own even offset so the
+	# rings stay equally spaced as they march from the saucer down to the ground.
+	_ring_t = fposmod(_ring_t + beam_ring_speed * delta, 1.0)
+	for i in _rings.size():
+		var t := fposmod(_ring_t + float(i) / float(_rings.size()), 1.0)
+		_update_ring(_rings[i], t)
+
+
+# Position, size and fade a single ring for phase t (0 = at the saucer, 1 = ground).
+func _update_ring(ring: MeshInstance3D, t: float) -> void:
+	ring.position.y = -t * fly_height
+	# Match the (now invisible) cone: narrow at the saucer, wide at the ground.
+	var radius := lerpf(0.6, beam_radius, t)
+	var s := radius / _RING_BASE_RADIUS
+	ring.scale = Vector3(s, 1.0, s)
+	# Soft fade in as a ring is born at the top and out as it reaches the ground,
+	# so rings never pop into or out of existence.
+	var fade := clampf(minf(t / 0.15, (1.0 - t) / 0.15), 0.0, 1.0)
+	var mat := ring.material_override as StandardMaterial3D
+	mat.albedo_color.a = beam_ring_color.a * fade
 
 
 func _handle_movement(delta: float) -> void:
@@ -94,7 +136,7 @@ func _handle_movement(delta: float) -> void:
 	# it is travelling (front dips going forward, right edge dips going right).
 	var bank := move * 0.25
 	_body.rotation.z = lerp(_body.rotation.z, -bank.dot(right), delta * 6.0)
-	_body.rotation.x = lerp(_body.rotation.x, bank.dot(forward), delta * 6.0)
+	_body.rotation.x = lerp(_body.rotation.x, -bank.dot(forward), delta * 6.0)
 
 
 # Terrain height directly below the saucer (0 if no sampler has been provided).
@@ -127,6 +169,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		_cam_yaw.rotate_y(-event.relative.x * mouse_sensitivity)
 		_pitch = clamp(_pitch - event.relative.y * mouse_sensitivity, min_pitch, max_pitch)
 		_cam_pitch.rotation.x = _pitch
+	elif event is InputEventMouseButton and event.pressed:
+		# Scroll wheel pulls the camera in (up) or out (down) along its boom.
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_cam_distance = clampf(_cam_distance - zoom_step, zoom_min, zoom_max)
+			_camera.position.z = _cam_distance
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_cam_distance = clampf(_cam_distance + zoom_step, zoom_min, zoom_max)
+			_camera.position.z = _cam_distance
 	elif event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
 		# Toggle the mouse between captured (look) and free (desktop cursor).
 		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -152,55 +202,91 @@ func _build_body() -> void:
 	_body.name = "Body"
 	add_child(_body)
 
-	# Lower disc: a squashed sphere.
-	var disc_mesh := SphereMesh.new()
-	disc_mesh.radius = 3.0
-	disc_mesh.height = 6.0
-	var disc := MeshInstance3D.new()
-	disc.mesh = disc_mesh
-	disc.scale = Vector3(1.0, 0.32, 1.0)   # flatten it into a saucer shape
-	disc.material_override = _metal_material(Color(0.62, 0.65, 0.70))
-	_body.add_child(disc)
+	# --- Hull: a wide, polished-chrome lens. --------------------------------
+	# Upper shell: a shallow, gently domed top.
+	var top_mesh := SphereMesh.new()
+	top_mesh.radius = 3.2
+	top_mesh.height = 6.4
+	var top := MeshInstance3D.new()
+	top.mesh = top_mesh
+	top.scale = Vector3(1.0, 0.17, 1.0)
+	top.material_override = _chrome_material(Color(0.72, 0.76, 0.82))
+	_body.add_child(top)
 
-	# Glass dome on top.
+	# Lower shell: a narrower, slightly deeper belly that tucks in under the rim.
+	var belly_mesh := SphereMesh.new()
+	belly_mesh.radius = 2.9
+	belly_mesh.height = 5.8
+	var belly := MeshInstance3D.new()
+	belly.mesh = belly_mesh
+	belly.scale = Vector3(1.0, 0.30, 1.0)
+	belly.position.y = -0.06
+	belly.material_override = _chrome_material(Color(0.55, 0.58, 0.64))
+	_body.add_child(belly)
+
+	# Sharp equatorial lip: a thin, darker chrome ring jutting out at the widest
+	# point — the hard knife edge where the top and bottom shells meet.
+	var rim_mesh := TorusMesh.new()
+	rim_mesh.inner_radius = 3.18
+	rim_mesh.outer_radius = 3.40
+	var rim := MeshInstance3D.new()
+	rim.mesh = rim_mesh
+	rim.scale = Vector3(1.0, 0.45, 1.0)   # flatten the lip so the edge is sharp
+	rim.material_override = _chrome_material(Color(0.28, 0.30, 0.34))
+	_body.add_child(rim)
+
+	# The iconic ring of running lights around the equator.
+	_build_light_ring(36, 3.16, 0.06, Vector3(0.16, 0.12, 0.10), Color(0.85, 0.95, 1.0))
+	# A smaller cluster of glowing lights on the underside.
+	_build_light_ring(18, 1.6, -0.78, Vector3(0.12, 0.10, 0.10), Color(0.55, 0.9, 1.0))
+
+	# --- Dark glass dome on top. --------------------------------------------
 	var dome_mesh := SphereMesh.new()
-	dome_mesh.radius = 1.4
-	dome_mesh.height = 2.8
+	dome_mesh.radius = 1.5
+	dome_mesh.height = 3.0
 	var dome := MeshInstance3D.new()
 	dome.mesh = dome_mesh
-	dome.scale = Vector3(1.0, 0.7, 1.0)
-	dome.position.y = 0.7
-	var dome_mat := _metal_material(Color(0.45, 0.85, 0.95))
+	dome.scale = Vector3(1.0, 0.58, 1.0)
+	dome.position.y = 0.44
+	var dome_mat := _chrome_material(Color(0.05, 0.09, 0.14))  # near-black blue glass
+	dome_mat.roughness = 0.05
 	dome_mat.emission_enabled = true
-	dome_mat.emission = Color(0.30, 0.70, 0.85)
-	dome_mat.emission_energy_multiplier = 0.6
+	dome_mat.emission = Color(0.10, 0.30, 0.45)
+	dome_mat.emission_energy_multiplier = 0.25
 	dome.material_override = dome_mat
 	_body.add_child(dome)
 
 
 func _build_beam() -> void:
-	# A translucent cone widening from the saucer down to the ground.
-	var beam_mesh := CylinderMesh.new()
-	beam_mesh.top_radius = 0.6           # narrow at the saucer
-	beam_mesh.bottom_radius = beam_radius  # wide where it hits the ground
-	beam_mesh.height = fly_height
-
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.45, 0.9, 1.0, 0.22)
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED   # visible from inside and out
-	mat.emission_enabled = true
-	mat.emission = Color(0.5, 0.9, 1.0)
-
-	_beam = MeshInstance3D.new()
+	# The beam is no longer a solid cone. Instead a pool of thin glowing rings
+	# slides down the (invisible) cone surface, from the saucer to the ground.
+	_beam = Node3D.new()
 	_beam.name = "Beam"
-	_beam.mesh = beam_mesh
-	_beam.material_override = mat
-	# Place it so the top sits at the saucer and the base rests on the ground.
-	_beam.position.y = -fly_height / 2.0
 	_beam.visible = false
 	add_child(_beam)
+
+	# One flat torus mesh, shared by every ring and scaled per-ring in _update_ring.
+	var ring_mesh := TorusMesh.new()
+	ring_mesh.inner_radius = 0.88
+	ring_mesh.outer_radius = 1.0   # (inner+outer)/2 must equal _RING_BASE_RADIUS
+
+	for i in beam_ring_count:
+		# Additive blending makes the overlapping rings read as light, and each
+		# ring gets its own material so it can fade independently of the others.
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = beam_ring_color
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED   # visible from inside and out
+
+		var ring := MeshInstance3D.new()
+		ring.mesh = ring_mesh
+		ring.material_override = mat
+		_beam.add_child(ring)
+		_rings.append(ring)
+		# Stagger the pool so the rings start out evenly spaced down the beam.
+		_update_ring(ring, float(i) / float(beam_ring_count))
 
 
 func _build_camera_rig() -> void:
@@ -222,9 +308,35 @@ func _build_camera_rig() -> void:
 
 
 # A shinier material for the saucer hull/dome.
-func _metal_material(color: Color) -> StandardMaterial3D:
+# A ring of small emissive boxes evenly spaced around the saucer, used for the
+# equatorial running lights and the underside glow. All boxes share one mesh and
+# one material; each is rotated to sit flush against the hull.
+func _build_light_ring(count: int, ring_radius: float, y: float, size: Vector3, color: Color) -> void:
+	var mesh := BoxMesh.new()
+	mesh.size = size
+
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
-	mat.metallic = 0.6
-	mat.roughness = 0.3
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = 3.0
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+
+	for i in count:
+		var a := TAU * float(i) / float(count)
+		var light := MeshInstance3D.new()
+		light.mesh = mesh
+		light.material_override = mat
+		light.position = Vector3(cos(a) * ring_radius, y, sin(a) * ring_radius)
+		light.rotation.y = -a
+		_body.add_child(light)
+
+
+# Polished chrome: fully metallic and nearly mirror-smooth so it reflects the
+# sky and horizon (the scene's ambient light source), reading as bright metal.
+func _chrome_material(color: Color) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mat.metallic = 1.0
+	mat.roughness = 0.12
 	return mat
