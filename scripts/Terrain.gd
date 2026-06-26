@@ -46,9 +46,11 @@ extends Node3D
 # biome_frequency only changes the SIZE of the green regions, not how many trees
 # grow in them. Scales every chunk's tree count; raise it for denser forests.
 @export var tree_density: float = 1.6
-# Per-chunk probability of a Swiss chalet (with its flag). Kept low so they stay
-# a scarce, special landmark dotted across the meadows.
-@export var chalet_chance: float = 0.1
+# Per-chunk probability of a Swiss chalet (with its flag). The world is large and
+# fog hides all but the nearest chunks, so a low value means you rarely stumble on
+# one near you. 0.3 keeps them special but actually findable; lower it once you've
+# confirmed the look (0.1-0.15 for properly scarce).
+@export var chalet_chance: float = 0.3
 
 # --- Water -----------------------------------------------------------------
 @export var water_level: float = -8.0      # terrain below this floods
@@ -425,47 +427,47 @@ func _make_bush(rng: RandomNumberGenerator) -> Node3D:
 
 # A little Swiss chalet: timber walls under a hip roof with a chimney, and a
 # flag on a pole planted beside it.
-func _make_chalet(rng: RandomNumberGenerator) -> Node3D:
+func _make_chalet(_rng: RandomNumberGenerator) -> Node3D:
 	var chalet := Node3D.new()
 	chalet.name = "Chalet"
 
 	var wall_mat := _solid_material(Color(0.82, 0.72, 0.55))   # warm timber walls
 	var roof_mat := _solid_material(Color(0.32, 0.17, 0.13))   # dark red-brown roof
 
-	# Walls.
+	# Walls: ~6.5 m wide, 5 m deep, 3.2 m tall (a real cottage dwarfs the cows).
 	var walls_mesh := BoxMesh.new()
-	walls_mesh.size = Vector3(2.8, 2.0, 2.4)
+	walls_mesh.size = Vector3(6.5, 3.2, 5.0)
 	var walls := MeshInstance3D.new()
 	walls.mesh = walls_mesh
 	walls.material_override = wall_mat
-	walls.position.y = 1.0
+	walls.position.y = 1.6
 	chalet.add_child(walls)
 
 	# Hip (pyramid) roof: a 4-sided cone turned 45 deg to sit square on the walls.
 	var roof_mesh := CylinderMesh.new()
 	roof_mesh.top_radius = 0.0
-	roof_mesh.bottom_radius = 2.0
-	roof_mesh.height = 1.4
+	roof_mesh.bottom_radius = 4.7   # ~6.6 m across the eaves, a little overhang
+	roof_mesh.height = 2.8          # steep alpine pitch; ridge ends up ~6 m up
 	roof_mesh.radial_segments = 4
 	var roof := MeshInstance3D.new()
 	roof.mesh = roof_mesh
 	roof.material_override = roof_mat
-	roof.position.y = 2.7
+	roof.position.y = 4.6           # base on the wall top (3.2) + half the height
 	roof.rotation.y = PI / 4.0
 	chalet.add_child(roof)
 
 	# A little chimney.
 	var chimney_mesh := BoxMesh.new()
-	chimney_mesh.size = Vector3(0.34, 0.7, 0.34)
+	chimney_mesh.size = Vector3(0.6, 1.5, 0.6)
 	var chimney := MeshInstance3D.new()
 	chimney.mesh = chimney_mesh
 	chimney.material_override = roof_mat
-	chimney.position = Vector3(0.7, 2.8, 0.4)
+	chimney.position = Vector3(1.7, 5.3, 0.9)
 	chalet.add_child(chimney)
 
-	# The flag on its pole, planted beside the cottage.
+	# The flag on its pole, planted just beside the cottage.
 	var flag := _make_flag()
-	flag.position = Vector3(2.5, 0.0, 0.6)
+	flag.position = Vector3(5.0, 0.0, 1.2)
 	chalet.add_child(flag)
 
 	return chalet
@@ -476,32 +478,33 @@ func _make_flag() -> Node3D:
 	var flag := Node3D.new()
 	flag.name = "Flag"
 
-	# Pole.
+	# Pole: ~6.5 m tall, standing a bit taller than the cottage ridge.
 	var pole_mesh := CylinderMesh.new()
-	pole_mesh.top_radius = 0.05
-	pole_mesh.bottom_radius = 0.06
-	pole_mesh.height = 4.0
+	pole_mesh.top_radius = 0.06
+	pole_mesh.bottom_radius = 0.08
+	pole_mesh.height = 6.5
 	var pole := MeshInstance3D.new()
 	pole.mesh = pole_mesh
 	pole.material_override = _solid_material(Color(0.72, 0.72, 0.74))
-	pole.position.y = 2.0
+	pole.position.y = 3.25
 	flag.add_child(pole)
 
-	# Red field, hanging from near the top of the pole.
-	var field_pos := Vector3(0.55, 3.4, 0.0)
+	# Red field (~1.3 m square), hanging from near the top of the pole.
+	var field_pos := Vector3(0.75, 5.3, 0.0)
 	var red := MeshInstance3D.new()
 	var red_mesh := BoxMesh.new()
-	red_mesh.size = Vector3(1.0, 1.0, 0.04)
+	red_mesh.size = Vector3(1.3, 1.3, 0.05)
 	red.mesh = red_mesh
 	red.material_override = _solid_material(Color(0.83, 0.10, 0.13))
 	red.position = field_pos
 	flag.add_child(red)
 
-	# White cross: two bars that poke through both faces so it reads from either side.
+	# White cross: arms ~1/5 of the field, poking through both faces so it reads
+	# from either side.
 	var white := _solid_material(Color(0.96, 0.96, 0.96))
 	var bar_v := MeshInstance3D.new()
 	var bar_v_mesh := BoxMesh.new()
-	bar_v_mesh.size = Vector3(0.2, 0.6, 0.1)
+	bar_v_mesh.size = Vector3(0.26, 0.78, 0.12)
 	bar_v.mesh = bar_v_mesh
 	bar_v.material_override = white
 	bar_v.position = field_pos
@@ -509,7 +512,7 @@ func _make_flag() -> Node3D:
 
 	var bar_h := MeshInstance3D.new()
 	var bar_h_mesh := BoxMesh.new()
-	bar_h_mesh.size = Vector3(0.6, 0.2, 0.1)
+	bar_h_mesh.size = Vector3(0.78, 0.26, 0.12)
 	bar_h.mesh = bar_h_mesh
 	bar_h.material_override = white
 	bar_h.position = field_pos
