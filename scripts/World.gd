@@ -4,43 +4,38 @@
 # The root of the game. Attached to the Main scene, it procedurally assembles
 # everything at startup:
 #   - input actions (WASD / mouse / beam)
-#   - the sky + fog environment that fakes an endless landscape
+#   - the sky + fog environment that fades the streaming world into the horizon
 #   - the sun (directional light)
-#   - a large tiled ground plane (a shader draws the repeating "tiles")
-#   - scattered cows and trees
+#   - the Terrain node, which streams an ENDLESS ground (chunks built/freed as
+#     you fly) along with its trees, rocks, bushes and water
+#   - a roaming herd of cows that follows the player so the pasture never empties
 #   - the player's flying saucer
 #   - the on-screen UI (minimap + HUD)
 #
-# There are no win/lose conditions: it is a relaxed sandbox. When a cow is
-# abducted we simply spawn a fresh one elsewhere so the pasture never empties.
+# There are no win/lose conditions: it is a relaxed sandbox. The Terrain owns
+# the world's SHAPE (height) and CHARACTER (biome); World owns the actors (cows,
+# saucer) and the UI, and keeps the herd gathered around wherever you fly.
 # =============================================================================
 extends Node3D
 
-# --- Tweakable world parameters (editable in the Inspector) ------------------
-@export var area_half: float = 180.0   # cows/trees spawn within +/- this on X and Z
-@export var ground_size: float = 700.0 # side length of the visible ground plane
-@export var cow_count: int = 22        # how many cows roam at once
-@export var fog_density: float = 0.003 # higher = thicker fog / closer horizon
+# --- Herd (cows follow the player so the world is never empty) ----------------
+@export var cow_count: int = 22            # how many cows roam near you at once
+@export var cow_despawn_radius: float = 220.0  # past this from the saucer, a cow is recycled
+@export var spawn_radius_min: float = 70.0     # cows reappear in a ring this near...
+@export var spawn_radius_max: float = 170.0    # ...to this far from the saucer
 
-# --- Trees / forests ---------------------------------------------------------
-@export var forest_count: int = 12     # number of little tree clusters
-@export var forest_radius: float = 24.0 # rough spread of each cluster
-@export var trees_per_forest_min: int = 8
-@export var trees_per_forest_max: int = 30
-@export var scattered_trees: int = 30  # lone trees sprinkled between the forests
-
-# --- Terrain shape -----------------------------------------------------------
-@export var terrain_amplitude: float = 15.0  # max hill/valley height (rolling, not alpine)
-@export var terrain_frequency: float = 0.006 # lower = broader, smoother hills
-@export var ground_segments: int = 150       # ground mesh resolution per side
+# --- Environment --------------------------------------------------------------
+@export var fog_density: float = 0.0026    # higher = thicker fog / closer horizon
 
 # Colour shared by the fog and the sky horizon. Matching them is the trick that
-# makes the ground melt seamlessly into the sky, hiding the world's edges.
+# makes the streaming ground melt seamlessly into the sky, hiding the loading edge.
 const HORIZON_COLOR := Color(0.74, 0.80, 0.86)
 
 var _captured_count: int = 0           # running tally of abducted cows
 var _hud_label: Label                  # top-left status text
-var _terrain := FastNoiseLite.new()    # the single source of truth for ground height
+var _terrain: Terrain                  # the streaming, infinite world
+var _saucer: Saucer                    # the player (cows/birds gather around it)
+var _sky_material: ShaderMaterial      # sky shader; its sun_dir is aimed at the sun light
 # Preloaded rather than referenced by class_name so the type always resolves,
 # even before the editor has rescanned and registered the global class.
 const GameAudioScript := preload("res://scripts/Audio.gd")
@@ -48,18 +43,22 @@ var _audio: GameAudioScript            # procedural sound (whistle, birds, moos)
 
 
 func _ready() -> void:
-	randomize()                        # different cow/tree layout every run
+	randomize()                        # different world seed / cow layout every run
 	_setup_input()
-	_setup_terrain()                   # must come before anything that samples height
 	_build_environment()
 	_build_sun()
-	_build_ground()
+	_build_terrain()                   # noise is ready immediately; chunks stream in
 	_build_audio()                     # bakes the moo/bird samples; starts the whistle
-	_spawn_trees()
-	_audio.setup_birds()               # attach bird emitters now that trees exist
-	_spawn_cows()                      # cows pick up the shared moo sample
-	_build_saucer()
+	_audio.setup_birds()               # roaming bird emitters (no longer tied to trees)
+	_build_saucer()                    # hovers using the terrain height sampler
+	_terrain.set_target(_saucer)       # start streaming the world around the saucer
+	_spawn_cows()                      # herd gathers around the saucer
 	_build_ui()
+
+
+# Keep the herd gathered around the player as it flies across the endless world.
+func _process(_delta: float) -> void:
+	_recycle_cows()
 
 
 # -----------------------------------------------------------------------------
@@ -85,8 +84,6 @@ func _setup_input() -> void:
 
 
 # Helper: create a single-key action if it does not already exist.
-# physical_key is typed as the Key enum so it flows into physical_keycode
-# (also a Key) without an int->enum conversion warning.
 func _add_key_action(action: String, physical_key: Key) -> void:
 	if not InputMap.has_action(action):
 		InputMap.add_action(action)
@@ -96,35 +93,126 @@ func _add_key_action(action: String, physical_key: Key) -> void:
 
 
 # -----------------------------------------------------------------------------
-# Environment: procedural sky + depth fog. The fog fades distant geometry into
-# the horizon colour, selling the illusion of an infinite plain.
+# Environment: a sky with a procedural mountain-range backdrop, plus light fog.
+# The sky is a sphere at infinity that always stays centred on the camera, so a
+# shader painting distant ranges onto it gives the look of a cylinder/dome of
+# scenery around the saucer — but with correct parallax (the ranges hold their
+# bearing as you fly) and no geometry to clip the streaming ground. A little fog
+# still melts the terrain's loading edge into the horizon haze, out of which the
+# mountains rise.
 # -----------------------------------------------------------------------------
 func _build_environment() -> void:
-	var sky_material := ProceduralSkyMaterial.new()
-	sky_material.sky_top_color = Color(0.38, 0.56, 0.86)
-	sky_material.sky_horizon_color = HORIZON_COLOR
-	sky_material.ground_horizon_color = HORIZON_COLOR
-	sky_material.ground_bottom_color = HORIZON_COLOR
-
+	_sky_material = _make_sky_material()
 	var sky := Sky.new()
-	sky.sky_material = sky_material
+	sky.sky_material = _sky_material
 
 	var env := Environment.new()
 	env.background_mode = Environment.BG_SKY
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 0.6
+	env.ambient_light_energy = 0.4   # lower fill so the sun's shadows actually read
 
-	# Distance fog tinted to match the horizon.
+	# Distance fog tinted to match the horizon, so the far terrain edge fades into
+	# the same haze the mountains sit behind.
 	env.fog_enabled = true
 	env.fog_light_color = HORIZON_COLOR
 	env.fog_density = fog_density
-	env.fog_sky_affect = 0.3   # let the fog blend slightly into the sky too
+	env.fog_sky_affect = 0.0   # don't fog the sky itself — keep the mountains crisp
 
 	var world_env := WorldEnvironment.new()
 	world_env.name = "WorldEnvironment"
 	world_env.environment = env
 	add_child(world_env)
+
+
+# A sky shader that draws two layered ridgelines of distant mountains around the
+# whole horizon. The ridge height is noise sampled on the azimuth CIRCLE, so it
+# wraps seamlessly (no join behind you), and each range fades into the horizon
+# haze toward its foot for atmospheric depth.
+func _make_sky_material() -> ShaderMaterial:
+	var shader := Shader.new()
+	shader.code = """
+shader_type sky;
+
+// The mountains are the MOST DISTANT thing in the scene, so aerial perspective
+// makes them pale and low-contrast — only a touch darker/bluer than the horizon
+// haze, fading lighter (and toward the haze) the farther back they sit. The
+// nearer range is a hair darker than the far one, giving smooth, monotonic depth
+// that continues the fog's haze rather than fighting it.
+uniform vec3 sky_top     : source_color = vec3(0.36, 0.56, 0.86);
+uniform vec3 sky_horizon : source_color = vec3(0.74, 0.80, 0.86); // == World HORIZON_COLOR
+uniform vec3 mtn_near    : source_color = vec3(0.60, 0.66, 0.75); // nearer  = slightly darker
+uniform vec3 mtn_far     : source_color = vec3(0.67, 0.73, 0.81); // farther = paler, hazier
+uniform vec3 sun_dir = vec3(0.0, 0.57, 0.82);                     // direction TO the sun (set by World)
+
+// A rounded ridge height in [0,1] from INTEGER harmonics of the view azimuth.
+// Every term is exactly 2*PI-periodic in `az`, so the silhouette wraps with no
+// seam. Used for the gentle nearer foothills. `f0` sets how many humps encircle
+// you; `phase` decorrelates the layers.
+float ridge_h(float az, float f0, float phase) {
+	float s =
+		  0.50 * sin(az * f0              + phase)
+		+ 0.25 * sin(az * (f0 * 2.0 + 1.0) + phase * 1.7)
+		+ 0.16 * sin(az * (f0 * 4.0 + 1.0) + phase * 2.3)
+		+ 0.09 * sin(az * (f0 * 7.0 + 1.0) + phase * 3.1);
+	return 0.5 + 0.5 * s;   // -> [0, 1]
+}
+
+// A more alpine ridgeline for the FAR range: ridged waves (1-|sin|) give cusped
+// peaks instead of round humps, with a couple of octaves of crag detail — jagged
+// but not noisy. Integer frequencies keep it seamless.
+float ridge_alpine(float az, float f0, float phase) {
+	float v = 0.0;
+	float amp = 0.60;
+	float freq = f0;
+	for (int i = 0; i < 3; i++) {
+		float t = sin(az * freq + phase * (1.0 + float(i) * 0.7));
+		v += amp * (1.0 - abs(t));   // cusped peak where the wave crosses zero
+		freq = freq * 2.0 + 1.0;     // stays integer -> stays seamless
+		amp *= 0.45;
+	}
+	return v;
+}
+
+// Composite one mountain range over the running sky colour. The range fades into
+// the horizon haze toward its foot so it melts into the fog, not a hard edge.
+vec3 add_range(vec3 col, float elev, float ridge, vec3 range_col) {
+	float inside = 1.0 - smoothstep(ridge - 0.0035, ridge + 0.0035, elev); // 1 below ridge
+	float lift = smoothstep(-0.05, ridge + 0.02, elev);                    // 0 at foot -> 1 at crest
+	vec3 mc = mix(sky_horizon, range_col, lift);
+	return mix(col, mc, inside);
+}
+
+void sky() {
+	vec3 dir = normalize(EYEDIR);
+	float elev = dir.y;
+	float az = atan(dir.x, dir.z);
+
+	// Base gradient: horizon haze up to blue overhead.
+	vec3 col = mix(sky_horizon, sky_top, pow(clamp(elev, 0.0, 1.0), 0.5));
+
+	// The sun, drawn onto the dome at sun_dir (handed in by World from the light).
+	// Done before the mountains so a low sun would be correctly hidden by a ridge.
+	{
+		float d = dot(dir, normalize(sun_dir));
+		float glow = pow(max(d, 0.0), 40.0) * 0.9;      // bright inner glow
+		float halo = pow(max(d, 0.0), 3.0) * 0.28;      // broad soft halo, easy to spot
+		col += vec3(1.0, 0.93, 0.78) * (glow + halo);   // additive warm glow + halo
+		float disc = smoothstep(0.9988, 0.9994, d);     // ~2.5 deg solar disc, on top
+		col = mix(col, vec3(1.0, 0.96, 0.85), disc);    // warm-white disc
+	}
+
+	// Farther range first: jagged alpine silhouette (paler, peaks high)...
+	col = add_range(col, elev, 0.012 + 0.155 * ridge_alpine(az, 5.0, 0.0), mtn_far);
+	// ...then the nearer range over it: the original gentle, rounded foothills.
+	col = add_range(col, elev, 0.004 + 0.085 * ridge_h(az, 6.0, 2.5), mtn_near);
+
+	COLOR = col;
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	return mat
 
 
 # -----------------------------------------------------------------------------
@@ -133,234 +221,39 @@ func _build_environment() -> void:
 func _build_sun() -> void:
 	var sun := DirectionalLight3D.new()
 	sun.name = "Sun"
-	sun.rotation_degrees = Vector3(-55.0, -35.0, 0.0)
-	sun.light_energy = 1.1
+	sun.rotation_degrees = Vector3(-35.0, -35.0, 0.0)   # ~35 deg elevation: in view when you look up, and offsets shadows nicely
+	sun.light_energy = 1.2
 	sun.shadow_enabled = true
+	# Keep the shadow map focused near the camera so the saucer's small offset
+	# shadow gets enough resolution to land on the open ground, not just on props.
+	sun.directional_shadow_max_distance = 120.0
+	# The saucer hovers ~15 units above the ground, so the default bias pushes its
+	# shadow clean off the flat terrain (peter-panning) while props closer to the
+	# caster still catch it. Lower the bias so the shadow lands on open ground too.
+	sun.shadow_bias = 0.03
+	sun.shadow_normal_bias = 0.8
 	add_child(sun)
 
-
-# -----------------------------------------------------------------------------
-# Terrain height field. FastNoiseLite gives smooth, layered noise; we keep the
-# amplitude small so the world is gently rolling — no canyons, no mountains.
-# This function is the ONE source of truth: the ground mesh, the cows and the
-# trees all read their height from get_height(), so nothing ever floats or sinks.
-# -----------------------------------------------------------------------------
-func _setup_terrain() -> void:
-	_terrain.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	_terrain.seed = randi()
-	_terrain.frequency = terrain_frequency
-	_terrain.fractal_type = FastNoiseLite.FRACTAL_FBM
-	_terrain.fractal_octaves = 3      # a couple of octaves for natural variation
-	_terrain.fractal_gain = 0.5
-	_terrain.fractal_lacunarity = 2.0
-
-
-# World-space ground height at (x, z). get_noise_2d returns ~[-1, 1].
-func get_height(x: float, z: float) -> float:
-	return _terrain.get_noise_2d(x, z) * terrain_amplitude
-
-
-# Upward surface normal at (x, z), derived analytically from the height field
-# (central differences). Always points up, so lighting is correct regardless of
-# triangle winding.
-func _ground_normal(x: float, z: float) -> Vector3:
-	var e := 1.0   # sampling step for the slope estimate
-	var hx := get_height(x - e, z) - get_height(x + e, z)
-	var hz := get_height(x, z - e) - get_height(x, z + e)
-	return Vector3(hx, 2.0 * e, hz).normalized()
+	# Aim the sky's sun disc exactly at this light. The direction TO the sun is the
+	# light's +Z axis (it shines along -Z), so we hand that to the sky shader
+	# directly instead of relying on the renderer's LIGHT0 plumbing.
+	_sky_material.set_shader_parameter("sun_dir", sun.global_transform.basis.z)
 
 
 # -----------------------------------------------------------------------------
-# Ground: a displaced grid mesh built from the height field. A custom spatial
-# shader paints a two-tone checkerboard from world position for the "tiles" look
-# and a strong sense of motion; the mesh's own normals shade the hills.
+# Terrain: the streaming, infinite world. It owns the height/biome noise, so it
+# is the single source of truth that the saucer and cows sample for ground height.
 # -----------------------------------------------------------------------------
-func _build_ground() -> void:
-	var half := ground_size / 2.0
-	var step := ground_size / float(ground_segments)
-
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-
-	# Lay down a grid of vertices, each pushed up/down by the height field and
-	# given its analytic normal so the lighting is smooth.
-	for j in range(ground_segments + 1):
-		for i in range(ground_segments + 1):
-			var x := -half + i * step
-			var z := -half + j * step
-			st.set_uv(Vector2(float(i), float(j)))
-			st.set_normal(_ground_normal(x, z))
-			st.add_vertex(Vector3(x, get_height(x, z), z))
-
-	# Stitch the grid into two triangles per quad.
-	var row := ground_segments + 1
-	for j in range(ground_segments):
-		for i in range(ground_segments):
-			var a := j * row + i
-			var b := a + 1
-			var c := a + row
-			var d := c + 1
-			st.add_index(a); st.add_index(c); st.add_index(b)
-			st.add_index(b); st.add_index(c); st.add_index(d)
-
-	var shader := Shader.new()
-	shader.code = """
-shader_type spatial;
-render_mode cull_disabled;
-
-// Stylised-but-natural grass. Colour comes from layered value noise keyed to
-// world position (so it never repeats visibly), with drier and earthier patches
-// mixed in and a little dirt showing on the steeper slopes. No textures needed.
-
-uniform vec3 grass_low  : source_color = vec3(0.20, 0.34, 0.15); // lush / shaded
-uniform vec3 grass_high : source_color = vec3(0.44, 0.55, 0.28); // sunlit blades
-uniform vec3 grass_dry  : source_color = vec3(0.56, 0.55, 0.30); // dry/yellowed
-uniform vec3 dirt_color : source_color = vec3(0.40, 0.31, 0.20); // bare earth
-
-varying vec3 world_pos;
-varying vec3 world_normal;
-
-// --- cheap value-noise FBM -------------------------------------------------
-float hash(vec2 p) {
-	p = fract(p * vec2(127.34, 311.21));
-	p += dot(p, p + 45.32);
-	return fract(p.x * p.y);
-}
-
-float vnoise(vec2 p) {
-	vec2 i = floor(p);
-	vec2 f = fract(p);
-	vec2 u = f * f * (3.0 - 2.0 * f);          // smootherstep blend
-	float a = hash(i);
-	float b = hash(i + vec2(1.0, 0.0));
-	float c = hash(i + vec2(0.0, 1.0));
-	float d = hash(i + vec2(1.0, 1.0));
-	return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-float fbm(vec2 p) {
-	float v = 0.0;
-	float amp = 0.5;
-	for (int i = 0; i < 4; i++) {
-		v += amp * vnoise(p);
-		p *= 2.0;
-		amp *= 0.5;
-	}
-	return v;
-}
-
-void vertex() {
-	// World-space position and normal, so the pattern and slope are stable.
-	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	world_normal = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
-}
-
-void fragment() {
-	vec2 wp = world_pos.xz;
-
-	float macro  = fbm(wp * 0.020);                 // broad lush/sunlit variation
-	float detail = fbm(wp * 0.220);                 // fine blade-level grain
-
-	// Base grass: blend lush <-> sunlit by the broad noise, then grain it.
-	vec3 grass = mix(grass_low, grass_high, macro);
-	grass *= 0.82 + 0.36 * detail;
-
-	// Dry, yellowed meadows in some regions.
-	float dry = smoothstep(0.55, 0.78, fbm(wp * 0.012 + vec2(31.0, 17.0)));
-	grass = mix(grass, grass_dry, dry * 0.55);
-
-	// Bare-earth patches, edges broken up by the fine grain.
-	float patch = smoothstep(0.58, 0.72, fbm(wp * 0.035 + vec2(60.0, 5.0)));
-	// A little dirt on the steeper faces too (terrain is gentle, so low thresholds).
-	float slope = 1.0 - clamp(world_normal.y, 0.0, 1.0);
-	float dirt_amt = max(patch, smoothstep(0.05, 0.16, slope));
-	dirt_amt *= 0.7 + 0.5 * detail;
-
-	vec3 col = mix(grass, dirt_color, clamp(dirt_amt, 0.0, 1.0));
-
-	ALBEDO = col;
-	ROUGHNESS = 1.0;
-}
-"""
-	var mat := ShaderMaterial.new()
-	mat.shader = shader
-
-	var ground := MeshInstance3D.new()
-	ground.name = "Ground"
-	ground.mesh = st.commit()
-	ground.material_override = mat
-	add_child(ground)
+func _build_terrain() -> void:
+	_terrain = Terrain.new()
+	_terrain.name = "Terrain"
+	add_child(_terrain)   # _ready() sets up its noise so get_height() works at once
 
 
 # -----------------------------------------------------------------------------
-# Trees: grouped into little forests so cows can hide under the canopies, with a
-# scattering of lone trees in between to break up the open ground.
-# -----------------------------------------------------------------------------
-func _spawn_trees() -> void:
-	# Forest clusters: pick a centre, then scatter a clump of trees around it.
-	for f in forest_count:
-		var center := _random_ground_position()
-		var count := randi_range(trees_per_forest_min, trees_per_forest_max)
-		for i in count:
-			# Uniform-ish disc sampling (sqrt keeps trees from bunching at centre).
-			var angle := randf() * TAU
-			var dist := sqrt(randf()) * forest_radius
-			var pos := center + Vector3(cos(angle) * dist, 0.0, sin(angle) * dist)
-			_plant_tree(pos)
-
-	# Lone trees sprinkled across the open pasture.
-	for i in scattered_trees:
-		_plant_tree(_random_ground_position())
-
-
-# Place one tree at (x, z), clamped to the pasture and sat on the terrain.
-func _plant_tree(pos: Vector3) -> void:
-	pos.x = clampf(pos.x, -area_half, area_half)
-	pos.z = clampf(pos.z, -area_half, area_half)
-	pos.y = get_height(pos.x, pos.z)
-	var tree := _make_tree()
-	tree.position = pos
-	tree.rotation.y = randf() * TAU
-	tree.add_to_group("trees")
-	add_child(tree)
-
-
-# Build one tree from primitives, with a little random size and tint so a forest
-# doesn't look like rows of identical clones.
-func _make_tree() -> Node3D:
-	var tree := Node3D.new()
-	tree.name = "Tree"
-	tree.scale = Vector3.ONE * randf_range(0.8, 1.5)
-
-	# Trunk: a thin brown cylinder.
-	var trunk_mesh := CylinderMesh.new()
-	trunk_mesh.top_radius = 0.3
-	trunk_mesh.bottom_radius = 0.4
-	trunk_mesh.height = 2.5
-	var trunk := MeshInstance3D.new()
-	trunk.mesh = trunk_mesh
-	trunk.material_override = _solid_material(Color(0.40, 0.26, 0.13))
-	trunk.position.y = 1.25
-	tree.add_child(trunk)
-
-	# Foliage: a green cone (a cylinder with a zero-radius top). Slightly varied
-	# green so each tree reads a little differently.
-	var green := Color(0.16, 0.42, 0.18).lerp(Color(0.22, 0.50, 0.20), randf())
-	var leaves_mesh := CylinderMesh.new()
-	leaves_mesh.top_radius = 0.0
-	leaves_mesh.bottom_radius = 2.0
-	leaves_mesh.height = 4.0
-	var leaves := MeshInstance3D.new()
-	leaves.mesh = leaves_mesh
-	leaves.material_override = _solid_material(green)
-	leaves.position.y = 4.5
-	tree.add_child(leaves)
-
-	return tree
-
-
-# -----------------------------------------------------------------------------
-# Cows: spawned from the Cow class. Each one wanders on its own.
+# Cows: a fixed-size herd that follows the player. Each cow wanders on its own;
+# any that drifts too far gets quietly relocated to a ring around the saucer, so
+# there are always cows nearby no matter how far you fly.
 # -----------------------------------------------------------------------------
 func _spawn_cows() -> void:
 	for i in cow_count:
@@ -369,17 +262,45 @@ func _spawn_cows() -> void:
 
 func _spawn_one_cow() -> void:
 	var cow := Cow.new()
-	cow.area_half = area_half
-	# Hand the cow the height sampler so it can walk over hills and valleys.
-	cow.ground_sampler = Callable(self, "get_height")
+	# Hand the cow the height sampler and water level so it walks the hills and
+	# steers clear of the ponds.
+	cow.ground_sampler = Callable(_terrain, "get_height")
+	cow.water_level = _terrain.water_level
 	cow.moo_stream = _audio.moo_stream   # shared baked moo sample
-	var pos := _random_ground_position()
-	pos.y = get_height(pos.x, pos.z)
-	cow.position = pos
+	cow.position = _ring_position_near_saucer()
 	cow.add_to_group("cows")
 	# When this cow is abducted, tally it and replace it so the field stays busy.
 	cow.captured.connect(_on_cow_captured)
 	add_child(cow)
+
+
+# Move any cow that has wandered (or been left) too far behind into a fresh spot
+# around the saucer. This is what makes the herd "follow" the player.
+func _recycle_cows() -> void:
+	if _saucer == null:
+		return
+	var sp := _saucer.global_position
+	var max_d2 := cow_despawn_radius * cow_despawn_radius
+	for cow in get_tree().get_nodes_in_group("cows"):
+		var dx: float = cow.global_position.x - sp.x
+		var dz: float = cow.global_position.z - sp.z
+		if dx * dx + dz * dz > max_d2:
+			cow.position = _ring_position_near_saucer()
+
+
+# A ground position in a ring around the saucer, nudged out of any water.
+func _ring_position_near_saucer() -> Vector3:
+	var center := _saucer.global_position if _saucer != null else Vector3.ZERO
+	var pos := Vector3.ZERO
+	# A few tries to avoid dropping a cow in a pond; good enough if all fail.
+	for attempt in 6:
+		var angle := randf() * TAU
+		var dist := randf_range(spawn_radius_min, spawn_radius_max)
+		pos = center + Vector3(cos(angle) * dist, 0.0, sin(angle) * dist)
+		pos.y = _terrain.get_height(pos.x, pos.z)
+		if pos.y >= _terrain.water_level + 0.5:
+			break
+	return pos
 
 
 func _on_cow_captured() -> void:
@@ -401,14 +322,14 @@ func _build_audio() -> void:
 # Saucer: the player. It carries its own orbit camera and tractor beam.
 # -----------------------------------------------------------------------------
 func _build_saucer() -> void:
-	var saucer := Saucer.new()
-	saucer.name = "Saucer"
+	_saucer = Saucer.new()
+	_saucer.name = "Saucer"
 	# Give the saucer the height sampler so it hovers at a fixed clearance above
 	# whatever ground is directly below it. Set before add_child so _ready() can
 	# use it for the starting altitude.
-	saucer.ground_sampler = Callable(self, "get_height")
-	saucer.add_to_group("saucer")
-	add_child(saucer)
+	_saucer.ground_sampler = Callable(_terrain, "get_height")
+	_saucer.add_to_group("saucer")
+	add_child(_saucer)
 
 
 # -----------------------------------------------------------------------------
@@ -446,23 +367,3 @@ func _build_ui() -> void:
 
 func _update_hud() -> void:
 	_hud_label.text = "Cows abducted: %d\n\nWASD  move\nMouse  look\nSpace / Left-click  tractor beam\nEsc  free the mouse" % _captured_count
-
-
-# -----------------------------------------------------------------------------
-# Shared helpers
-# -----------------------------------------------------------------------------
-
-# A flat, fully-coloured material used by most props.
-func _solid_material(color: Color) -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = color
-	return mat
-
-
-# Pick a random spot on the ground within the spawn area.
-func _random_ground_position() -> Vector3:
-	return Vector3(
-		randf_range(-area_half, area_half),
-		0.0,
-		randf_range(-area_half, area_half)
-	)

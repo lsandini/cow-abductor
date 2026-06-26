@@ -19,9 +19,12 @@ extends Node3D
 @export var fly_height: float = 15.0       # target clearance above the ground below
 @export var min_clearance: float = 9.0     # never drop closer than this to the ground
 @export var vertical_follow: float = 4.0   # how briskly altitude eases over hills
+@export var turn_rate: float = 5.0         # how briskly the body yaws to face travel
+@export var bank_amount: float = 0.4       # max roll (rad) leaned into a hard turn
+@export var pitch_amount: float = 0.16     # forward lean (rad) at full speed
 @export var mouse_sensitivity: float = 0.005
 @export var min_pitch: float = -1.3        # how far down the camera can look (rad)
-@export var max_pitch: float = -0.1        # how far up the camera can look (rad)
+@export var max_pitch: float = 0.52        # how far UP the camera can look (rad ~= 30 deg)
 
 # --- Camera zoom (mouse wheel) -----------------------------------------------
 @export var zoom_min: float = 6.0          # closest the camera can pull in
@@ -132,11 +135,28 @@ func _handle_movement(delta: float) -> void:
 	position.y = lerp(position.y, target_y, clampf(vertical_follow * delta, 0.0, 1.0))
 	position.y = maxf(position.y, ground + min_clearance)
 
-	# Cosmetic banking: tilt the disc so the leading edge dips in the direction
-	# it is travelling (front dips going forward, right edge dips going right).
-	var bank := move * 0.25
-	_body.rotation.z = lerp(_body.rotation.z, -bank.dot(right), delta * 6.0)
-	_body.rotation.x = lerp(_body.rotation.x, -bank.dot(forward), delta * 6.0)
+	# Orient the body toward where it is flying: yaw the disc so its leading edge
+	# points along the travel direction, roll (bank) into turns, and lean forward
+	# a touch with speed. Only the visible body turns — the orbit camera and the
+	# downward beam are separate children of the saucer, so they stay put.
+	var speed01 := move.length()   # 0 (hovering) .. 1 (full tilt of the stick)
+	if speed01 > 0.05:
+		# Smoothly yaw the body to face the travel direction (local +Z = front).
+		var target_yaw := atan2(move.x, move.z)
+		var prev_yaw := _body.rotation.y
+		var new_yaw := lerp_angle(prev_yaw, target_yaw, clampf(turn_rate * delta, 0.0, 1.0))
+		_body.rotation.y = new_yaw
+
+		# Bank into the turn, scaled by how fast the heading is swinging this frame.
+		var turn_rate_now := angle_difference(prev_yaw, new_yaw) / maxf(delta, 0.0001)
+		var roll := clampf(-turn_rate_now * 0.12, -bank_amount, bank_amount)
+		_body.rotation.z = lerp(_body.rotation.z, roll, clampf(delta * 6.0, 0.0, 1.0))
+		# Nose dips forward proportionally to speed.
+		_body.rotation.x = lerp(_body.rotation.x, pitch_amount * speed01, clampf(delta * 6.0, 0.0, 1.0))
+	else:
+		# Level out to a flat hover when there is no input.
+		_body.rotation.z = lerp(_body.rotation.z, 0.0, clampf(delta * 4.0, 0.0, 1.0))
+		_body.rotation.x = lerp(_body.rotation.x, 0.0, clampf(delta * 4.0, 0.0, 1.0))
 
 
 # Terrain height directly below the saucer (0 if no sampler has been provided).

@@ -21,7 +21,9 @@ signal captured
 # --- Wandering tuning --------------------------------------------------------
 @export var wander_speed: float = 2.2      # walking speed (m/s)
 @export var turn_speed: float = 6.0        # how quickly it rotates to face travel
-var area_half: float = 180.0               # stay within +/- this on X and Z (set by World)
+# Below this terrain height the ground is flooded; the cow turns away rather than
+# wade in. Set by World from the Terrain (defaults to "no water").
+var water_level: float = -1000.0
 
 # --- Abduction tuning --------------------------------------------------------
 @export var pull_rise: float = 6.0         # vertical lift speed inside the beam
@@ -189,10 +191,16 @@ func _wander(delta: float) -> void:
 	if _grazing:
 		return   # standing still, head down, eating grass
 
-	# Walk in the current heading and keep inside the pasture. Facing/turning is
-	# handled by _orient_on_slope, which also tilts the cow onto the terrain.
-	position += _heading * wander_speed * delta
-	_keep_in_bounds()
+	# Step forward in the current heading. Facing/turning is handled by
+	# _orient_on_slope, which also tilts the cow onto the terrain.
+	var next := position + _heading * wander_speed * delta
+	# If that step would walk into water, turn to a new heading and stay put this
+	# frame rather than wading into a pond.
+	if ground_sampler.is_valid() and ground_sampler.call(next.x, next.z) < water_level + 0.4:
+		var angle := randf() * TAU
+		_heading = Vector3(cos(angle), 0.0, sin(angle))
+		return
+	position = next
 
 
 # Randomly decide whether to graze or stroll, and for how long.
@@ -202,15 +210,6 @@ func _pick_new_action() -> void:
 	if not _grazing:
 		var angle := randf() * TAU
 		_heading = Vector3(cos(angle), 0.0, sin(angle))
-
-
-# Turn back toward the centre if a cow strays past the spawn area edge.
-func _keep_in_bounds() -> void:
-	if absf(position.x) > area_half or absf(position.z) > area_half:
-		_heading = (-position).normalized()
-		_heading.y = 0.0
-	position.x = clampf(position.x, -area_half, area_half)
-	position.z = clampf(position.z, -area_half, area_half)
 
 
 # -----------------------------------------------------------------------------

@@ -58,21 +58,18 @@ func _build_whistle() -> void:
 	_whistle_playback = _whistle_player.get_stream_playback() as AudioStreamGeneratorPlayback
 
 
-# Place a few bird emitters up in random tree canopies. Call after the trees
-# have been spawned.
+# Create a small pool of bird emitters. They are NOT parented to trees (those
+# stream in and out as the player flies); instead each is repositioned to a
+# random nearby spot just before it chirps, so birdsong always seems to drift
+# out of the trees and sky around you.
 func setup_birds() -> void:
-	var trees := get_tree().get_nodes_in_group("trees")
-	trees.shuffle()
-	var count: int = min(6, trees.size())
-	for i in count:
+	for i in 6:
 		var emitter := AudioStreamPlayer3D.new()
 		emitter.stream = _bird_stream
 		emitter.volume_db = -5.0
 		emitter.max_distance = 90.0
 		emitter.unit_size = 14.0
-		var tree: Node3D = trees[i]
-		tree.add_child(emitter)
-		emitter.position.y = 5.0   # up among the leaves
+		add_child(emitter)
 		_bird_emitters.append(emitter)
 
 
@@ -81,13 +78,20 @@ func _process(delta: float) -> void:
 	_tick_birds(delta)
 
 
-# Trigger a random bird to chirp every couple of seconds.
+# Trigger a random bird to chirp every couple of seconds, from a fresh spot
+# somewhere around the saucer (up among where the trees and sky are).
 func _tick_birds(delta: float) -> void:
 	if _bird_emitters.is_empty():
 		return
 	_bird_countdown -= delta
 	if _bird_countdown <= 0.0:
 		var emitter := _bird_emitters[randi() % _bird_emitters.size()]
+		var saucer := get_tree().get_first_node_in_group("saucer") as Saucer
+		if saucer != null:
+			var angle := randf() * TAU
+			var dist := randf_range(20.0, 70.0)
+			emitter.global_position = saucer.global_position + Vector3(
+				cos(angle) * dist, randf_range(-6.0, 8.0), sin(angle) * dist)
 		emitter.pitch_scale = randf_range(0.9, 1.3)   # vary the "bird"
 		emitter.play()
 		_bird_countdown = randf_range(1.5, 4.5)
