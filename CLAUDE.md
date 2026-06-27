@@ -82,11 +82,17 @@ pasture is never empty no matter how far you fly.
 | `scripts/Saucer.gd` | Flight, orbit camera (mouse look), banking/yaw-to-travel, tractor beam. |
 | `scripts/Cow.gd` | Wander AI, slope orientation, water avoidance, getting abducted (`captured` signal). |
 | `scripts/Minimap.gd` | Bottom-right radar; saucer-relative, redrawn every frame. |
-| `scripts/Audio.gd` | Procedural audio: live-synthesized UFO whistle + baked moo/bird samples. |
+| `scripts/Audio.gd` | Procedural audio: live-synthesized UFO whistle + baked moo/bell/bird samples. |
+| `scripts/SoundLab.gd` | Standalone synth-prototyping bench (`scenes/SoundLab.tscn`) — **not part of the game**; used to tune moo/bell recipes before baking them into `Audio.gd`. |
 
 ### Audio
 
 `Audio.gd` mixes two techniques: the UFO whistle is **live-synthesized** every
-frame into an `AudioStreamGenerator` (so it can react to the beam), while the moo
-and bird chirps are **baked once** into `AudioStreamWAV` buffers from raw PCM.
-Cows share the single baked moo sample.
+frame into an `AudioStreamGenerator` (so it can react to the beam), while the moo,
+cowbell and bird chirps are **baked once** into `AudioStreamWAV` buffers from raw
+PCM. Cows share the single baked moo sample; only some cows wear a bell (the
+shared baked `bell_stream`).
+
+New baked sounds are prototyped in `SoundLab.gd` (run `scenes/SoundLab.tscn`
+on its own), which auditions code-synthesised recipes through the same 3D path a
+cow uses; the chosen recipe is then locked into `Audio.gd`.

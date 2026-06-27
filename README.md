@@ -42,6 +42,7 @@ of cows follows you, drifting back into view whenever it strays too far.
 | `scripts/Saucer.gd` | Flight, orbit camera and tractor beam. |
 | `scripts/Cow.gd` | Cow wandering AI + getting abducted. |
 | `scripts/Minimap.gd` | The bottom-right radar. |
+| `scripts/Audio.gd` | Procedural sound: live UFO whistle + baked moo, bell and bird samples. |
 
 Handy things to tweak live in the **Inspector** (or at the top of each script):
 saucer `move_speed` / `fly_height` / `beam_radius`, World `cow_count` /
