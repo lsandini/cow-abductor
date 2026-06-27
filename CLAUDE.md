@@ -67,11 +67,16 @@ Nodes find each other through groups rather than holding references:
   `get_first_node_in_group("saucer")`.
 - `"cows"` — every cow. The saucer iterates this group each physics frame and
   calls `cow.set_pulled(grabbed, self)`; a grabbed cow then rides its own beam.
+- `"farmers"` — herd guards. Each farmer looks up the `"saucer"` each physics
+  frame and, while the beam is firing within range, shoots at it: a harmless
+  recoil tilt + a metallic ding (`Saucer.register_hit`), never any damage.
 - `"trees"` — used by the minimap (and historically birdsong).
 
 The cows form a **follow-the-player herd**: `World._recycle_cows()` relocates any
 cow that drifts past `cow_despawn_radius` to a ring around the saucer, so the
-pasture is never empty no matter how far you fly.
+pasture is never empty no matter how far you fly. Farmers follow the same way
+(`World._recycle_farmers`), but are relocated *beside a cow* so they always guard
+the herd.
 
 ### Files
 
@@ -79,19 +84,23 @@ pasture is never empty no matter how far you fly.
 | --- | --- |
 | `scripts/World.gd` | Assembles sky/fog, sun, lighting, audio, saucer, herd, UI; registers input; sky shader; cow recycling. |
 | `scripts/Terrain.gd` | Infinite streaming world: height/biome noise, chunk build/free, props, water. The height authority. |
-| `scripts/Saucer.gd` | Flight, orbit camera (mouse look), banking/yaw-to-travel, tractor beam. |
+| `scripts/Saucer.gd` | Flight, orbit camera (mouse look), banking/yaw-to-travel, tractor beam; `register_hit` recoil + ding. |
 | `scripts/Cow.gd` | Wander AI, slope orientation, water avoidance, getting abducted (`captured` signal). |
+| `scripts/Farmer.gd` | Herd guard: tracks the saucer, fires an old rifle (muzzle flash + slow visible bullet) while it beams nearby cows. |
 | `scripts/Minimap.gd` | Bottom-right radar; saucer-relative, redrawn every frame. |
-| `scripts/Audio.gd` | Procedural audio: live-synthesized UFO whistle + baked moo/bell/bird samples. |
+| `scripts/HeadingTape.gd` | Top-of-screen semitransparent compass ribbon; reads heading from the saucer's planar facing. |
+| `scripts/FlightReadouts.gd` | Light HUD speed (left) + altitude (right) readouts; reads `get_speed()` / `get_altitude()` off the saucer. |
+| `scripts/Audio.gd` | Procedural audio: live-synthesized UFO whistle + baked moo/bell/bird/ding samples. |
 | `scripts/SoundLab.gd` | Standalone synth-prototyping bench (`scenes/SoundLab.tscn`) — **not part of the game**; used to tune moo/bell recipes before baking them into `Audio.gd`. |
 
 ### Audio
 
 `Audio.gd` mixes two techniques: the UFO whistle is **live-synthesized** every
 frame into an `AudioStreamGenerator` (so it can react to the beam), while the moo,
-cowbell and bird chirps are **baked once** into `AudioStreamWAV` buffers from raw
-PCM. Cows share the single baked moo sample; only some cows wear a bell (the
-shared baked `bell_stream`).
+cowbell, bird chirps and the farmer-hit ding are **baked once** into
+`AudioStreamWAV` buffers from raw PCM. Cows share the single baked moo sample;
+only some cows wear a bell (the shared baked `bell_stream`); the saucer holds the
+shared `ding_stream` and plays it from `register_hit`.
 
 New baked sounds are prototyped in `SoundLab.gd` (run `scenes/SoundLab.tscn`
 on its own), which auditions code-synthesised recipes through the same 3D path a

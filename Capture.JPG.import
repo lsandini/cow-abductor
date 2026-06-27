@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://dpow0cr2c3i6n"
-path="res://.godot/imported/saucer.png-6175285401f4685c93d9a09a5ea666bd.ctex"
+uid="uid://dj3ahyxqjm8a6"
+path="res://.godot/imported/Capture.JPG-6bd344b77eef8777f8cac45ed6049263.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://saucer.png"
-dest_files=["res://.godot/imported/saucer.png-6175285401f4685c93d9a09a5ea666bd.ctex"]
+source_file="res://Capture.JPG"
+dest_files=["res://.godot/imported/Capture.JPG-6bd344b77eef8777f8cac45ed6049263.ctex"]
 
 [params]
 

@@ -21,6 +21,7 @@ extends Control
 const BG_COLOR := Color(0.05, 0.08, 0.06, 0.55)
 const BORDER_COLOR := Color(0.6, 1.0, 0.7, 0.8)
 const COW_COLOR := Color(1.0, 1.0, 1.0)
+const FARMER_COLOR := Color(0.95, 0.25, 0.2)
 const TREE_COLOR := Color(0.3, 0.7, 0.35)
 const SAUCER_COLOR := Color(1.0, 0.9, 0.2)
 const BEAM_COLOR := Color(0.5, 0.9, 1.0, 0.9)
@@ -61,6 +62,15 @@ func _draw() -> void:
 			offset = offset.normalized() * radius
 			p = center + offset
 		draw_circle(p, 3.0, COW_COLOR)
+
+	# Farmers: red dots, also clamped to the rim so you can see them coming.
+	for farmer in get_tree().get_nodes_in_group("farmers"):
+		var p := _world_to_map(farmer.global_position, origin, map_scale, center)
+		var offset := p - center
+		if offset.length() > radius:
+			offset = offset.normalized() * radius
+			p = center + offset
+		draw_circle(p, 3.0, FARMER_COLOR)
 
 	# Beam reach ring (only while the beam is active).
 	if saucer.beam_active:

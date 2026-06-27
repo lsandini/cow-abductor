@@ -24,6 +24,9 @@ extends Node3D
 @export var spawn_radius_min: float = 70.0     # cows reappear in a ring this near...
 @export var spawn_radius_max: float = 170.0    # ...to this far from the saucer
 
+# --- Farmers (guard the herd; shoot at the saucer when it beams their cows) ----
+@export var farmer_count: int = 6          # how many farmers roam near you at once
+
 # --- Environment --------------------------------------------------------------
 @export var fog_density: float = 0.0026    # higher = thicker fog / closer horizon
 
@@ -32,6 +35,8 @@ extends Node3D
 const HORIZON_COLOR := Color(0.74, 0.80, 0.86)
 
 var _captured_count: int = 0           # running tally of abducted cows
+var _hits_taken: int = 0               # running tally of farmer rifle hits taken
+var _elapsed: float = 0.0              # seconds since the session started
 var _hud_label: Label                  # top-left status text
 var _terrain: Terrain                  # the streaming, infinite world
 var _saucer: Saucer                    # the player (cows/birds gather around it)
@@ -53,12 +58,17 @@ func _ready() -> void:
 	_build_saucer()                    # hovers using the terrain height sampler
 	_terrain.set_target(_saucer)       # start streaming the world around the saucer
 	_spawn_cows()                      # herd gathers around the saucer
+	_spawn_farmers()                   # a few farmers stand guard among the cows
 	_build_ui()
 
 
-# Keep the herd gathered around the player as it flies across the endless world.
-func _process(_delta: float) -> void:
+# Keep the herd gathered around the player as it flies across the endless world,
+# tick the session clock, and refresh the HUD (the elapsed time changes constantly).
+func _process(delta: float) -> void:
+	_elapsed += delta
 	_recycle_cows()
+	_recycle_farmers()   # after the cows, so farmers relocate beside the gathered herd
+	_update_hud()
 
 
 # -----------------------------------------------------------------------------
@@ -71,6 +81,11 @@ func _setup_input() -> void:
 	_add_key_action("move_back", KEY_S)
 	_add_key_action("move_left", KEY_A)
 	_add_key_action("move_right", KEY_D)
+
+	# Altitude: Z raises the hover height, X lowers it (next to WASD so the left
+	# hand never leaves the flight keys).
+	_add_key_action("altitude_up", KEY_Z)
+	_add_key_action("altitude_down", KEY_X)
 
 	# The tractor beam can be fired with Space OR the left mouse button.
 	if not InputMap.has_action("beam"):
@@ -310,6 +325,59 @@ func _on_cow_captured() -> void:
 	_spawn_one_cow()   # keep the world populated — there is no "running out".
 
 
+# A farmer's rifle shot landed (harmless): just bump the HUD tally.
+func _on_saucer_hit() -> void:
+	_hits_taken += 1
+
+
+# -----------------------------------------------------------------------------
+# Farmers: a handful of guards that stand among the cows and shoot at the saucer
+# (harmlessly) when it tries to beam one up. Like the cows they follow the player
+# — any farmer left too far behind is relocated beside the herd.
+# -----------------------------------------------------------------------------
+func _spawn_farmers() -> void:
+	for i in farmer_count:
+		_spawn_one_farmer()
+
+
+func _spawn_one_farmer() -> void:
+	var farmer := Farmer.new()
+	farmer.ground_sampler = Callable(_terrain, "get_height")
+	farmer.water_level = _terrain.water_level
+	farmer.position = _farmer_position()
+	farmer.add_to_group("farmers")
+	add_child(farmer)
+
+
+# Relocate any farmer that has drifted too far behind to a spot beside the herd.
+func _recycle_farmers() -> void:
+	if _saucer == null:
+		return
+	var sp := _saucer.global_position
+	var max_d2 := cow_despawn_radius * cow_despawn_radius
+	for farmer in get_tree().get_nodes_in_group("farmers"):
+		var dx: float = farmer.global_position.x - sp.x
+		var dz: float = farmer.global_position.z - sp.z
+		if dx * dx + dz * dz > max_d2:
+			farmer.position = _farmer_position()
+
+
+# A dry ground spot a few metres from one of the cows (so farmers guard the herd).
+# Falls back to the cow-spawn ring if there are no cows or no dry spot is found.
+func _farmer_position() -> Vector3:
+	var cows := get_tree().get_nodes_in_group("cows")
+	if not cows.is_empty():
+		for attempt in 6:
+			var cow: Node3D = cows[randi() % cows.size()]
+			var angle := randf() * TAU
+			var dist := randf_range(3.0, 9.0)
+			var pos := cow.global_position + Vector3(cos(angle) * dist, 0.0, sin(angle) * dist)
+			pos.y = _terrain.get_height(pos.x, pos.z)
+			if pos.y >= _terrain.water_level + 0.5:
+				return pos
+	return _ring_position_near_saucer()
+
+
 # -----------------------------------------------------------------------------
 # Audio: the procedural sound manager (UFO whistle, birds, baked moo sample).
 # -----------------------------------------------------------------------------
@@ -329,8 +397,10 @@ func _build_saucer() -> void:
 	# whatever ground is directly below it. Set before add_child so _ready() can
 	# use it for the starting altitude.
 	_saucer.ground_sampler = Callable(_terrain, "get_height")
+	_saucer.ding_stream = _audio.ding_stream   # metallic "ding" when a farmer's shot lands
 	_saucer.add_to_group("saucer")
 	add_child(_saucer)
+	_saucer.hit.connect(_on_saucer_hit)   # tally rifle hits for the HUD
 
 
 # -----------------------------------------------------------------------------
@@ -355,6 +425,29 @@ func _build_ui() -> void:
 	minimap.offset_bottom = -20.0
 	layer.add_child(minimap)
 
+	# Compass heading tape, centred along the top of the screen.
+	var compass := HeadingTape.new()
+	compass.name = "HeadingTape"
+	compass.anchor_left = 0.5
+	compass.anchor_right = 0.5
+	compass.anchor_top = 0.0
+	compass.anchor_bottom = 0.0
+	compass.offset_left = -260.0
+	compass.offset_right = 260.0
+	compass.offset_top = 14.0
+	compass.offset_bottom = 66.0
+	compass.mouse_filter = Control.MOUSE_FILTER_IGNORE   # never intercept beam clicks
+	layer.add_child(compass)
+
+	# Speed (left) + altitude (right) readouts: a full-screen overlay that draws
+	# itself flush to each edge, matching the compass's light style.
+	var readouts := FlightReadouts.new()
+	readouts.name = "FlightReadouts"
+	readouts.anchor_right = 1.0
+	readouts.anchor_bottom = 1.0
+	readouts.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(readouts)
+
 	# HUD text in the top-left.
 	_hud_label = Label.new()
 	_hud_label.name = "Hud"
@@ -367,4 +460,6 @@ func _build_ui() -> void:
 
 
 func _update_hud() -> void:
-	_hud_label.text = "Cows abducted: %d\n\nWASD  move\nMouse  look\nSpace / Left-click  tractor beam\nEsc  free the mouse" % _captured_count
+	var minutes := int(_elapsed) / 60
+	var seconds := int(_elapsed) % 60
+	_hud_label.text = "Cows abducted: %d\nHits taken: %d\nTime: %d:%02d\n\nWASD  move\nZ / X  altitude\nMouse  look\nSpace / Left-click  tractor beam\nEsc  free the mouse" % [_captured_count, _hits_taken, minutes, seconds]

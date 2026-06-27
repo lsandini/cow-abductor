@@ -32,6 +32,7 @@ var _cur_freq := 520.0 # smoothed base pitch
 # --- Baked one-shot samples (shared) -----------------------------------------
 var moo_stream: AudioStreamWAV       # handed to every cow
 var bell_stream: AudioStreamWAV      # alpine cowbell; handed to the cows that wear one
+var ding_stream: AudioStreamWAV      # metallic ricochet; handed to the saucer (farmer hits)
 var _bird_stream: AudioStreamWAV
 var _bird_emitters: Array[AudioStreamPlayer3D] = []
 var _bird_countdown := 2.0
@@ -40,6 +41,7 @@ var _bird_countdown := 2.0
 func _ready() -> void:
 	moo_stream = render_moo(RATE)
 	bell_stream = render_bell(RATE)
+	ding_stream = render_ding(RATE)
 	_bird_stream = render_bird_phrase(RATE)
 	_build_whistle()
 
@@ -239,6 +241,41 @@ static func render_bell(rate: int) -> AudioStreamWAV:
 		if t < 0.012:                          # clapper strike: a short noise tick
 			var k := 1.0 - t / 0.012
 			s += strike * (randf() * 2.0 - 1.0) * k * k * 1.2
+		samples[i] = s
+	samples = _normalize(samples, 0.9)
+	return _pcm16(samples, rate)
+
+
+# Bake a "ding" — a bullet smacking a tin can, NOT a tuned bell. The character
+# is dull and percussive: a loud noisy THUNK at impact, a few LOW, hollow,
+# inharmonic resonances that die almost immediately, a faint buzzy rattle (thin
+# tin), and a slight downward pitch bend that gives the hollow "bonk". Short and
+# cheap, not pretty.
+static func render_ding(rate: int) -> AudioStreamWAV:
+	var dur := 0.18
+	var n := int(dur * rate)
+	var samples := PackedFloat32Array()
+	samples.resize(n)
+	# Low, hollow, inharmonic tin resonances: [frequency Hz, amplitude, decay-speed].
+	var partials := [
+		[340.0, 1.00, 30.0],
+		[560.0, 0.75, 38.0],
+		[870.0, 0.45, 50.0],
+		[1230.0, 0.25, 66.0],
+	]
+	for i in n:
+		var t := float(i) / float(rate)
+		var bend := 1.0 - 0.12 * (t / dur)        # slight pitch sag -> hollow "bonk"
+		var s := 0.0
+		for p in partials:
+			var freq: float = p[0] * bend
+			var amp: float = p[1]
+			var dspeed: float = p[2]
+			s += amp * exp(-t * dspeed) * sin(TAU * freq * t)
+		# The impact: a sharp noisy thunk at the very start...
+		s += (randf() * 2.0 - 1.0) * exp(-t * 55.0) * 1.1
+		# ...plus a quick buzzy rattle bleeding through the thin tin.
+		s += (randf() * 2.0 - 1.0) * exp(-t * 30.0) * 0.25 * sin(TAU * 180.0 * t)
 		samples[i] = s
 	samples = _normalize(samples, 0.9)
 	return _pcm16(samples, rate)
