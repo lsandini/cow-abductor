@@ -46,6 +46,14 @@ var moo_stream: AudioStream
 var _moo_player: AudioStreamPlayer3D
 var _moo_timer: float = 0.0
 
+# Supplied by the World: a shared, baked alpine cowbell. Only some cows end up
+# wearing one; a belled cow clonks rhythmically while it walks (not while it
+# stands grazing), each with its own fixed base pitch so the herd sounds varied.
+var bell_stream: AudioStream
+var _bell_player: AudioStreamPlayer3D
+var _bell_timer: float = 0.0
+var _bell_pitch: float = 1.0   # this bell's "note" (per-cow, constant)
+
 # Wander state machine.
 var _grazing: bool = true
 var _heading: Vector3 = Vector3.FORWARD
@@ -77,11 +85,24 @@ func _build_audio() -> void:
 	add_child(_moo_player)
 	_moo_timer = randf_range(4.0, 18.0)   # first moo is staggered
 
+	# Roughly two in five cows wear a bell, each tuned to its own note.
+	if bell_stream != null and randf() < 0.4:
+		_bell_pitch = randf_range(0.8, 1.25)
+		_bell_player = AudioStreamPlayer3D.new()
+		_bell_player.stream = bell_stream
+		_bell_player.volume_db = -7.0          # frequent sound, kept gentle
+		_bell_player.max_distance = 80.0
+		_bell_player.unit_size = 12.0
+		_bell_player.position.y = 1.0          # around the neck
+		add_child(_bell_player)
+		_bell_timer = randf_range(0.0, 0.6)
+
 
 # Called by the saucer each frame: are we in the beam, and which saucer is it?
 func set_pulled(pulled: bool, saucer: Node3D) -> void:
 	if pulled and not _pulled:
 		_moo(true)   # just got grabbed -> a startled, higher-pitched moo
+		_clonk()     # and a jolt of the bell as it's yanked off its feet
 	_pulled = pulled
 	_saucer = saucer
 
@@ -92,6 +113,14 @@ func _moo(panic: bool) -> void:
 		return
 	_moo_player.pitch_scale = randf_range(1.3, 1.6) if panic else randf_range(0.85, 1.12)
 	_moo_player.play()
+
+
+# Strike the bell once, at this cow's fixed note with a touch of per-strike wobble.
+func _clonk() -> void:
+	if _bell_player == null:
+		return
+	_bell_player.pitch_scale = _bell_pitch * randf_range(0.97, 1.03)
+	_bell_player.play()
 
 
 func _physics_process(delta: float) -> void:
@@ -110,6 +139,7 @@ func _physics_process(delta: float) -> void:
 		position.y = _ground_y()      # hug the terrain as it grazes / walks
 		_orient_on_slope(delta)       # and tilt to match the slope underfoot
 		_tick_moo(delta)              # occasional contented moo
+		_tick_bell(delta)             # bell clonks in time with walking
 
 
 # Count down to the next idle moo while grazing/walking.
@@ -120,6 +150,17 @@ func _tick_moo(delta: float) -> void:
 	if _moo_timer <= 0.0:
 		_moo(false)
 		_moo_timer = randf_range(12.0, 28.0)
+
+
+# Clonk the bell on a footstep-ish cadence, but only while actually walking —
+# a grazing cow stands still, so its bell falls silent.
+func _tick_bell(delta: float) -> void:
+	if _bell_player == null or _grazing:
+		return
+	_bell_timer -= delta
+	if _bell_timer <= 0.0:
+		_clonk()
+		_bell_timer = randf_range(0.45, 0.8)
 
 
 # Terrain height under the cow right now (falls back to 0 if no sampler set).

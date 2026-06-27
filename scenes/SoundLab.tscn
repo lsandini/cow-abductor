@@ -1,0 +1,17 @@
+[gd_scene load_steps=2 format=3]
+
+; ----------------------------------------------------------------------------
+; SoundLab.tscn — standalone procedural-sound bench. NOT the game.
+;
+; Open this scene and press F6 (Run Current Scene) to prototype new code-
+; synthesised sounds before integrating them. Running it does not change the
+; project's main scene, so Main.tscn / the real game is untouched.
+;
+; Like Main.tscn this is intentionally tiny: an empty Node3D carrying
+; SoundLab.gd, which builds the camera, audio players and UI at runtime.
+; ----------------------------------------------------------------------------
+
+[ext_resource type="Script" path="res://scripts/SoundLab.gd" id="1_lab"]
+
+[node name="SoundLab" type="Node3D"]
+script = ExtResource("1_lab")

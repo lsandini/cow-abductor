@@ -267,6 +267,7 @@ func _spawn_one_cow() -> void:
 	cow.ground_sampler = Callable(_terrain, "get_height")
 	cow.water_level = _terrain.water_level
 	cow.moo_stream = _audio.moo_stream   # shared baked moo sample
+	cow.bell_stream = _audio.bell_stream # shared bell; only some cows end up wearing one
 	cow.position = _ring_position_near_saucer()
 	cow.add_to_group("cows")
 	# When this cow is abducted, tally it and replace it so the field stays busy.

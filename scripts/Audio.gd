@@ -31,6 +31,7 @@ var _cur_freq := 520.0 # smoothed base pitch
 
 # --- Baked one-shot samples (shared) -----------------------------------------
 var moo_stream: AudioStreamWAV       # handed to every cow
+var bell_stream: AudioStreamWAV      # alpine cowbell; handed to the cows that wear one
 var _bird_stream: AudioStreamWAV
 var _bird_emitters: Array[AudioStreamPlayer3D] = []
 var _bird_countdown := 2.0
@@ -38,6 +39,7 @@ var _bird_countdown := 2.0
 
 func _ready() -> void:
 	moo_stream = render_moo(RATE)
+	bell_stream = render_bell(RATE)
 	_bird_stream = render_bird_phrase(RATE)
 	_build_whistle()
 
@@ -196,6 +198,48 @@ static func render_moo(rate: int) -> AudioStreamWAV:
 		elif u > 1.0 - rel / dur:
 			env = (1.0 - u) * dur / rel
 		samples[i] = s * env
+	samples = _normalize(samples, 0.9)
+	return _pcm16(samples, rate)
+
+
+# Bake an alpine cowbell. A struck metal bell is a sum of INHARMONIC partials
+# (non-integer frequency ratios), each decaying exponentially — higher partials
+# die faster, which is why a bell goes "clank...mmm". The two lowest partials sit
+# at a ~1.48 ratio: that clash is the signature that reads as "cowbell" rather
+# than "chime". A short noise burst at the very start is the clapper strike.
+# Recipe tuned in the Sound Lab: 400 Hz, 1.0 s ring, 0.6 brightness, 0.65 strike.
+static func render_bell(rate: int) -> AudioStreamWAV:
+	var freq := 400.0
+	var decay := 1.0
+	var bright := 0.6
+	var strike := 0.65
+	var dur := decay + 0.06
+	var n := int(dur * rate)
+	var samples := PackedFloat32Array()
+	samples.resize(n)
+	# [frequency ratio, amplitude, decay-speed multiplier].
+	var partials := [
+		[1.000, 1.00, 1.0],
+		[1.480, 0.95, 1.15],   # the cowbell-defining clash
+		[2.670, 0.55, 1.9],
+		[3.930, 0.38, 2.7],
+		[5.430, 0.24, 3.6],
+		[6.790, 0.16, 4.6],
+	]
+	for i in n:
+		var t := float(i) / float(rate)
+		var s := 0.0
+		for p in partials:
+			var ratio: float = p[0]
+			var amp: float = p[1]
+			var dmult: float = p[2]
+			if ratio > 1.5:
+				amp *= 0.25 + bright          # brightness scales the metallic clank
+			s += amp * exp(-t * dmult / decay) * sin(TAU * freq * ratio * t)
+		if t < 0.012:                          # clapper strike: a short noise tick
+			var k := 1.0 - t / 0.012
+			s += strike * (randf() * 2.0 - 1.0) * k * k * 1.2
+		samples[i] = s
 	samples = _normalize(samples, 0.9)
 	return _pcm16(samples, rate)
 
