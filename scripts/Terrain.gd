@@ -27,7 +27,7 @@ extends Node3D
 
 # --- Streaming -------------------------------------------------------------
 @export var chunk_size: float = 130.0      # world side length of one chunk
-@export var chunk_segments: int = 22       # mesh resolution per chunk side
+@export var chunk_segments: int = 36       # mesh resolution per chunk side
 @export var view_radius: int = 4           # chunks kept loaded in each direction
 @export var builds_per_frame: int = 2      # how many chunks we may build per frame
 
@@ -246,16 +246,20 @@ func _build_chunk(coord: Vector2i) -> void:
 func _build_ground_mesh(coord: Vector2i) -> Mesh:
 	var seg := chunk_segments
 	var step := chunk_size / float(seg)
-	var ox := coord.x * chunk_size
-	var oz := coord.y * chunk_size
 
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
 	for j in range(seg + 1):
 		for i in range(seg + 1):
-			var x := ox + i * step
-			var z := oz + j * step
+			# Index from the GLOBAL grid (coord*seg + i) rather than off a per-chunk
+			# origin, so a chunk's last edge column lands on EXACTLY the same float
+			# coordinate as the next chunk's first column. The height/biome/normal
+			# samplers then return identical values on both sides — no seam. (Adding
+			# i*step onto a per-chunk origin instead leaves a sub-unit float mismatch
+			# at the edge that shows up as a faint biome-colour grid line.)
+			var x := (coord.x * seg + i) * step
+			var z := (coord.y * seg + j) * step
 			st.set_color(Color(get_biome(x, z), 0.0, 0.0, 1.0))
 			st.set_uv(Vector2(float(i), float(j)))
 			st.set_normal(_ground_normal(x, z))
@@ -308,9 +312,20 @@ func _scatter_props(parent: Node3D, coord: Vector2i) -> void:
 	for t in int(round(rng.randf_range(0.0, 5.0) * tree_lush)):
 		_place_prop(parent, "tree", ox + rng.randf() * chunk_size, oz + rng.randf() * chunk_size, rng)
 
-	# Rocks — more common on dry/barren ground.
-	for r in int(round(rng.randf_range(0.0, 4.0) * (1.0 - lush))):
+	# Rocks — sparse on lush pasture, common on dry/barren ground.
+	var barren := 1.0 - lush
+	for r in int(round(rng.randf_range(0.0, 3.0) + barren * 6.0)):
 		_place_prop(parent, "rock", ox + rng.randf() * chunk_size, oz + rng.randf() * chunk_size, rng)
+
+	# In the most barren chunks, occasionally drop a scree field — a tight cluster
+	# of rocks that reads as a stony patch matching the bare ground texture.
+	if barren > 0.5 and rng.randf() < barren * 0.55:
+		var sx := ox + rng.randf() * chunk_size
+		var sz := oz + rng.randf() * chunk_size
+		for i in rng.randi_range(4, 9):
+			var a := rng.randf() * TAU
+			var d := sqrt(rng.randf()) * 7.0
+			_place_prop(parent, "rock", sx + cos(a) * d, sz + sin(a) * d, rng)
 
 	# Bushes sprinkled everywhere to break up the grass.
 	for b in rng.randi_range(0, 4):
@@ -324,9 +339,14 @@ func _scatter_props(parent: Node3D, coord: Vector2i) -> void:
 		var hh := get_height(hx, hz)
 		if hh >= water_level + 0.6 and hh < 40.0:
 			var chalet := _make_chalet(rng)
+			var rot := rng.randf() * TAU
 			chalet.position = Vector3(hx, hh - 0.2, hz)   # nestle slightly into the slope
-			chalet.rotation.y = rng.randf() * TAU
+			chalet.rotation.y = rot
 			parent.add_child(chalet)
+			# The fence is built in world space (each post sampled against the
+			# terrain) so it hugs the slope instead of floating, so it lives on the
+			# chunk rather than under the flat chalet node.
+			_build_fence(parent, hx, hz, rot, rng)
 
 
 # Sit a prop on the terrain at (x, z), skipping anything that would stand in
@@ -425,52 +445,240 @@ func _make_bush(rng: RandomNumberGenerator) -> Node3D:
 	return bush
 
 
-# A little Swiss chalet: timber walls under a hip roof with a chimney, and a
-# flag on a pole planted beside it.
-func _make_chalet(_rng: RandomNumberGenerator) -> Node3D:
+# A Valais-style Swiss chalet (see chalet.jpg): dark weathered-timber walls on a
+# stone base, under a steep GABLED roof of grey stone slates, with a stone
+# chimney, shuttered windows over flower boxes, a flag, and a split-rail fence
+# ringing the yard.
+func _make_chalet(rng: RandomNumberGenerator) -> Node3D:
 	var chalet := Node3D.new()
 	chalet.name = "Chalet"
 
-	var wall_mat := _solid_material(Color(0.82, 0.72, 0.55))   # warm timber walls
-	var roof_mat := _solid_material(Color(0.32, 0.17, 0.13))   # dark red-brown roof
+	# Weathered alpine palette, with a little per-chalet variation.
+	var timber_mat := _solid_material(
+		Color(0.34, 0.24, 0.16).lerp(Color(0.46, 0.33, 0.22), rng.randf()))   # sun-darkened logs
+	var stone_mat := _solid_material(Color(0.54, 0.53, 0.50))                  # foundation / chimney
+	var slate_mat := _solid_material(
+		Color(0.38, 0.40, 0.43).lerp(Color(0.46, 0.46, 0.47), rng.randf()))   # grey stone-slab roof
 
-	# Walls: ~6.5 m wide, 5 m deep, 3.2 m tall (a real cottage dwarfs the cows).
+	const W := 6.5    # width  (x)
+	const D := 5.0    # depth  (z)
+	const WALL_H := 3.0
+
+	# Stone foundation the timber sits on — a touch wider so it reads as a plinth.
+	var base_mesh := BoxMesh.new()
+	base_mesh.size = Vector3(W + 0.3, 1.0, D + 0.3)
+	var base := MeshInstance3D.new()
+	base.mesh = base_mesh
+	base.material_override = stone_mat
+	base.position.y = 0.5
+	chalet.add_child(base)
+
+	# Timber walls (log-cabin body) standing on the plinth.
 	var walls_mesh := BoxMesh.new()
-	walls_mesh.size = Vector3(6.5, 3.2, 5.0)
+	walls_mesh.size = Vector3(W, WALL_H, D)
 	var walls := MeshInstance3D.new()
 	walls.mesh = walls_mesh
-	walls.material_override = wall_mat
-	walls.position.y = 1.6
+	walls.material_override = timber_mat
+	walls.position.y = 1.0 + WALL_H * 0.5
 	chalet.add_child(walls)
 
-	# Hip (pyramid) roof: a 4-sided cone turned 45 deg to sit square on the walls.
-	var roof_mesh := CylinderMesh.new()
-	roof_mesh.top_radius = 0.0
-	roof_mesh.bottom_radius = 4.7   # ~6.6 m across the eaves, a little overhang
-	roof_mesh.height = 2.8          # steep alpine pitch; ridge ends up ~6 m up
-	roof_mesh.radial_segments = 4
+	var eaves_y := 1.0 + WALL_H   # top of the walls / base of the roof
+
+	# Gabled roof: a triangular prism. The PrismMesh extrudes its triangle along
+	# Z, so we rotate it 90 deg to lay the ridge along X (the width). Generous
+	# overhang on all sides, the way heavy alpine roofs hang over the walls.
+	const ROOF_H := 2.4
+	var roof_mesh := PrismMesh.new()
+	roof_mesh.size = Vector3(D + 1.4, ROOF_H, W + 1.0)   # (base across eaves, height, ridge length)
 	var roof := MeshInstance3D.new()
 	roof.mesh = roof_mesh
-	roof.material_override = roof_mat
-	roof.position.y = 4.6           # base on the wall top (3.2) + half the height
-	roof.rotation.y = PI / 4.0
+	roof.material_override = slate_mat
+	roof.position.y = eaves_y + ROOF_H * 0.5
+	roof.rotation.y = PI / 2.0
 	chalet.add_child(roof)
 
-	# A little chimney.
+	# Triangular gable infill so the timber wall reaches the ridge on the end
+	# faces (the prism alone would leave the gable ends open above the eaves).
+	for sx in [-1.0, 1.0]:
+		var gable_mesh := PrismMesh.new()
+		gable_mesh.size = Vector3(D, ROOF_H, 0.25)
+		var gable := MeshInstance3D.new()
+		gable.mesh = gable_mesh
+		gable.material_override = timber_mat
+		gable.position = Vector3(sx * (W * 0.5 - 0.12), eaves_y + ROOF_H * 0.5, 0.0)
+		gable.rotation.y = PI / 2.0
+		chalet.add_child(gable)
+
+	# Stone chimney rising past the ridge.
 	var chimney_mesh := BoxMesh.new()
-	chimney_mesh.size = Vector3(0.6, 1.5, 0.6)
+	chimney_mesh.size = Vector3(0.7, 2.0, 0.7)
 	var chimney := MeshInstance3D.new()
 	chimney.mesh = chimney_mesh
-	chimney.material_override = roof_mat
-	chimney.position = Vector3(1.7, 5.3, 0.9)
+	chimney.material_override = stone_mat
+	chimney.position = Vector3(W * 0.25, eaves_y + 1.4, 0.0)
 	chalet.add_child(chimney)
+
+	# A heavy plank door, centred on the front (+Z) face.
+	var door_mesh := BoxMesh.new()
+	door_mesh.size = Vector3(1.1, 2.0, 0.12)
+	var door := MeshInstance3D.new()
+	door.mesh = door_mesh
+	door.material_override = _solid_material(Color(0.22, 0.15, 0.10))
+	door.position = Vector3(0.0, 2.0, D * 0.5 + 0.02)
+	chalet.add_child(door)
+
+	# Shuttered windows with flower boxes, two on the front, one on each end.
+	for wx in [-1.9, 1.9]:
+		var win := _make_window(rng)
+		win.position = Vector3(wx, 2.0, D * 0.5 + 0.02)
+		chalet.add_child(win)
+	for sx2 in [-1.0, 1.0]:
+		var win_side := _make_window(rng)
+		win_side.position = Vector3(sx2 * (W * 0.5 + 0.02), 2.0, 0.0)
+		win_side.rotation.y = sx2 * PI / 2.0
+		chalet.add_child(win_side)
 
 	# The flag on its pole, planted just beside the cottage.
 	var flag := _make_flag()
-	flag.position = Vector3(5.0, 0.0, 1.2)
+	flag.position = Vector3(W * 0.5 + 1.0, 0.0, 1.2)
 	chalet.add_child(flag)
 
+	# The split-rail fence is built separately, in world space, so it can hug the
+	# terrain slope (see _build_fence at the chalet's call site).
 	return chalet
+
+
+# A small shuttered window (facing +Z) over a flower box, the way alpine chalets
+# carry geraniums on every sill. Returned in its own frame so callers just
+# position/rotate it onto a wall.
+func _make_window(rng: RandomNumberGenerator) -> Node3D:
+	var win := Node3D.new()
+	win.name = "Window"
+
+	# White-painted frame with a dark glass pane recessed into it.
+	var frame := MeshInstance3D.new()
+	var frame_mesh := BoxMesh.new()
+	frame_mesh.size = Vector3(1.05, 1.2, 0.1)
+	frame.mesh = frame_mesh
+	frame.material_override = _solid_material(Color(0.90, 0.89, 0.85))
+	win.add_child(frame)
+
+	var pane := MeshInstance3D.new()
+	var pane_mesh := BoxMesh.new()
+	pane_mesh.size = Vector3(0.82, 0.96, 0.08)
+	pane.mesh = pane_mesh
+	pane.material_override = _solid_material(Color(0.20, 0.26, 0.30))
+	pane.position.z = 0.04
+	win.add_child(pane)
+
+	# Open shutters flanking the frame.
+	var shutter_mat := _solid_material(Color(0.45, 0.20, 0.16))   # weathered barn red
+	for sx in [-1.0, 1.0]:
+		var shutter := MeshInstance3D.new()
+		var shutter_mesh := BoxMesh.new()
+		shutter_mesh.size = Vector3(0.28, 1.2, 0.06)
+		shutter.mesh = shutter_mesh
+		shutter.material_override = shutter_mat
+		shutter.position = Vector3(sx * 0.66, 0.0, 0.04)
+		win.add_child(shutter)
+
+	# Flower box on the sill with a few bright blooms.
+	var box := MeshInstance3D.new()
+	var box_mesh := BoxMesh.new()
+	box_mesh.size = Vector3(1.1, 0.22, 0.26)
+	box.mesh = box_mesh
+	box.material_override = _solid_material(Color(0.30, 0.20, 0.13))
+	box.position = Vector3(0.0, -0.74, 0.14)
+	win.add_child(box)
+
+	var blooms := [Color(0.86, 0.20, 0.28), Color(0.90, 0.36, 0.55), Color(0.80, 0.16, 0.20)]
+	for i in 5:
+		var petal := MeshInstance3D.new()
+		var petal_mesh := SphereMesh.new()
+		petal_mesh.radius = 0.11
+		petal_mesh.height = 0.22
+		petal.mesh = petal_mesh
+		petal.material_override = _solid_material(blooms[rng.randi() % blooms.size()])
+		petal.position = Vector3(-0.44 + i * 0.22, -0.60, 0.18)
+		win.add_child(petal)
+
+	return win
+
+
+# A rustic split-rail fence enclosing the chalet's yard, with a gate gap at the
+# front. Built in WORLD space (added to the chunk, not the chalet): every post is
+# sampled against the terrain so the fence hugs the slope, and the rails tilt to
+# join neighbouring post tops instead of floating flat. Purely cosmetic — props
+# carry no collision. (ox, oz) is the chalet's world position; rot its yaw.
+func _build_fence(parent: Node3D, ox: float, oz: float, rot: float, _rng: RandomNumberGenerator) -> void:
+	var mat := _solid_material(Color(0.40, 0.29, 0.19))
+
+	const HX := 7.5    # half-extents of the yard (chalet-local)
+	const HZ := 6.5
+	const GATE := 1.4  # half-width of the front gate opening
+
+	# Five straight runs in chalet-local XZ; the front (+Z) is split around the gate.
+	_fence_run(parent, mat, ox, oz, rot, Vector2(-HX, HZ), Vector2(-GATE, HZ))   # front-left
+	_fence_run(parent, mat, ox, oz, rot, Vector2(GATE, HZ), Vector2(HX, HZ))     # front-right
+	_fence_run(parent, mat, ox, oz, rot, Vector2(-HX, -HZ), Vector2(HX, -HZ))    # back
+	_fence_run(parent, mat, ox, oz, rot, Vector2(-HX, -HZ), Vector2(-HX, HZ))    # left
+	_fence_run(parent, mat, ox, oz, rot, Vector2(HX, -HZ), Vector2(HX, HZ))      # right
+
+
+# Turn a chalet-local XZ offset into a world XZ point (yaw rotation + translation).
+func _fence_world(ox: float, oz: float, rot: float, local: Vector2) -> Vector2:
+	var c := cos(rot)
+	var s := sin(rot)
+	return Vector2(ox + c * local.x + s * local.y, oz - s * local.x + c * local.y)
+
+
+# Build one straight fence run between two chalet-local points: evenly spaced
+# posts, each dropped onto the terrain, joined by two rails that tilt to follow
+# the ground between consecutive posts.
+func _fence_run(parent: Node3D, mat: StandardMaterial3D, ox: float, oz: float, rot: float,
+		a: Vector2, b: Vector2) -> void:
+	var spans := int(max(1, round((b - a).length() / 2.4)))
+
+	# Sample each post's world position + terrain height along the run.
+	var pts: Array[Vector3] = []
+	for i in spans + 1:
+		var local := a.lerp(b, float(i) / float(spans))
+		var w := _fence_world(ox, oz, rot, local)
+		pts.append(Vector3(w.x, get_height(w.x, w.y), w.y))
+
+	# Posts: stand each one at its sampled height, sunk a little into the ground.
+	for p in pts:
+		var post := MeshInstance3D.new()
+		var post_mesh := BoxMesh.new()
+		post_mesh.size = Vector3(0.16, 1.5, 0.16)
+		post.mesh = post_mesh
+		post.material_override = mat
+		post.position = p + Vector3(0.0, 0.45, 0.0)   # top ~1.2 above ground, base sunk ~0.3
+		post.rotation.y = rot
+		parent.add_child(post)
+
+	# Rails: one segment per post gap, tilted to connect the two post tops so the
+	# rail follows the slope instead of cutting through or floating over it.
+	for ry in [0.55, 1.0]:
+		for i in spans:
+			var p0 := pts[i] + Vector3(0.0, ry, 0.0)
+			var p1 := pts[i + 1] + Vector3(0.0, ry, 0.0)
+			var seg := p1 - p0
+			var rail := MeshInstance3D.new()
+			var rail_mesh := BoxMesh.new()
+			rail_mesh.size = Vector3(seg.length(), 0.12, 0.08)
+			rail.mesh = rail_mesh
+			rail.material_override = mat
+			# Orient the rail's local +X axis along the segment (handles both the
+			# horizontal heading and the up/down pitch of the slope).
+			var x_axis := seg.normalized()
+			var z_axis := x_axis.cross(Vector3.UP)
+			if z_axis.length() < 0.001:
+				z_axis = Vector3.FORWARD   # degenerate: perfectly vertical segment
+			z_axis = z_axis.normalized()
+			var y_axis := z_axis.cross(x_axis).normalized()
+			rail.transform = Transform3D(Basis(x_axis, y_axis, z_axis), (p0 + p1) * 0.5)
+			parent.add_child(rail)
 
 
 # A small Swiss flag (red field with a white cross) on a slim pole.
@@ -613,23 +821,46 @@ void vertex() {
 void fragment() {
 	vec2 wp = world_pos.xz;
 
-	float macro  = fbm(wp * 0.020);
-	float detail = fbm(wp * 0.220);
+	// Multi-scale noise fields, all keyed to world position so regions blend
+	// organically and never repeat or tile.
+	float macro  = fbm(wp * 0.020);                         // grass tone variation
+	float detail = fbm(wp * 0.220);                         // fine graining
+	float region = fbm(wp * 0.0065 + vec2(19.0, 7.0));      // very large regions
+	float patchN = fbm(wp * 0.050  + vec2(60.0, 5.0));      // medium ragged patches
+	float slope  = 1.0 - clamp(world_normal.y, 0.0, 1.0);
 
-	// Base grass, grained by the fine noise.
+	// Aridity: how dry/barren this stretch of ground is. Driven by the biome
+	// field (sparse-tree regions read as dry) AND an independent large-scale
+	// noise, so barren ground also crops up inside otherwise green country —
+	// variety without any geometric boundary.
+	float aridity = clamp(0.7 * (1.0 - v_lush) + 0.9 * region - 0.35, 0.0, 1.0);
+
+	// Base grass, grained by the fine noise, with a subtle per-region hue drift
+	// so even the lush pastures aren't one flat green.
 	vec3 grass = mix(grass_low, grass_high, macro);
+	grass = mix(grass, grass * vec3(0.96, 1.03, 0.90), region * 0.5);
 	grass *= 0.82 + 0.36 * detail;
 
-	// Dry biomes yellow out; a little local noise softens the biome edge.
-	float dry = clamp((1.0 - v_lush) * (0.7 + 0.6 * fbm(wp * 0.010 + vec2(31.0, 17.0))), 0.0, 1.0);
-	grass = mix(grass, grass_dry, dry * 0.7);
+	// Arid stretches yellow toward dry-grass colour.
+	grass = mix(grass, grass_dry, smoothstep(0.10, 0.70, aridity) * 0.8);
 
-	// Bare-earth patches and a little dirt on gentle slopes.
-	float patch = smoothstep(0.58, 0.72, fbm(wp * 0.035 + vec2(60.0, 5.0)));
-	float slope = 1.0 - clamp(world_normal.y, 0.0, 1.0);
-	float dirt_amt = max(patch, smoothstep(0.05, 0.16, slope));
-	dirt_amt *= 0.7 + 0.5 * detail;
+	// Barren exposed earth: grows with aridity, with ragged medium-noise edges
+	// (noise pushed into the threshold input, not the output, so the boundary
+	// stays soft and irregular instead of a clean contour).
+	float barren = smoothstep(0.48, 0.86, aridity + (patchN - 0.5) * 0.55);
+	// Bare earth on genuinely steep ground only. The threshold starts well above
+	// flat (0.18) so tiny per-facet normal wobble on pasture does NOT trip it —
+	// otherwise the low-poly mesh triangles outline themselves as a dirt grid.
+	float slope_dirt = smoothstep(0.18, 0.42, slope);
+	float dirt_amt = max(barren, slope_dirt * 0.85);
+	dirt_amt *= 0.75 + 0.45 * detail;
 	vec3 col = mix(grass, dirt_color, clamp(dirt_amt, 0.0, 1.0));
+
+	// Scattered stones / scree: speckle grey rock into the ground, densest where
+	// it is most barren so dry country reads as genuinely stony.
+	float speck = fbm(wp * 0.7 + vec2(3.0, 9.0));
+	float stones = smoothstep(0.58, 0.74, speck) * (0.18 + 0.82 * barren);
+	col = mix(col, rock_color * (0.85 + 0.3 * detail), clamp(stones, 0.0, 1.0));
 
 	// Grey rock on the steeper, higher mountain faces (kept above ordinary hills).
 	float rocky = smoothstep(0.22, 0.5, slope) * smoothstep(34.0, 70.0, world_pos.y);

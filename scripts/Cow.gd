@@ -290,6 +290,13 @@ func _build_body() -> void:
 	# Muzzle: a soft pink snout at the very front.
 	_add_part(_sphere(0.24), pink, Vector3(0, 1.22, 1.20), Vector3.ZERO, Vector3(1.0, 0.78, 0.7))
 
+	# Eyes: little white eyeballs with dark pupils, set on the front of the face
+	# just above the muzzle so the cow reads as friendly and wide-eyed.
+	var eye_white := _solid_material(Color(0.97, 0.97, 0.95))
+	for ex in [-0.165, 0.165]:
+		_add_part(_sphere(0.09), eye_white, Vector3(ex, 1.47, 1.06), Vector3.ZERO, Vector3(0.9, 1.0, 0.7))
+		_add_part(_sphere(0.05), black, Vector3(ex, 1.46, 1.15))
+
 	# Ears: flattened spheres angled out from the sides of the head.
 	_add_part(_sphere(0.14), coat, Vector3(0.30, 1.46, 0.86), Vector3(0, 0, -35), Vector3(1.5, 0.5, 0.9))
 	_add_part(_sphere(0.14), coat, Vector3(-0.30, 1.46, 0.86), Vector3(0, 0, 35), Vector3(1.5, 0.5, 0.9))
@@ -304,8 +311,12 @@ func _build_body() -> void:
 			_add_part(_cylinder(0.13, 0.09, 0.78), coat, Vector3(x, 0.42, z))
 			_add_part(_cylinder(0.11, 0.11, 0.14), black, Vector3(x, 0.07, z))
 
-	# Udder under the belly toward the back.
-	_add_part(_sphere(0.20), pink, Vector3(0, 0.66, -0.30), Vector3.ZERO, Vector3(1.1, 0.8, 1.2))
+	# Udder: a soft pink dome under the belly toward the back (flat side tucked up
+	# into the belly, rounded side hanging down), finished with four little teats.
+	_add_part(_dome(0.22), pink, Vector3(0, 0.62, -0.28), Vector3(180, 0, 0), Vector3(1.25, 1.0, 1.35))
+	for tx in [-0.09, 0.09]:
+		for tz in [-0.20, -0.36]:
+			_add_part(_cylinder(0.028, 0.038, 0.13), pink, Vector3(tx, 0.45, tz))
 
 	# Tail: a thin drooping cylinder off the rump with a dark tuft on the end.
 	_add_part(_cylinder(0.05, 0.04, 0.6), coat, Vector3(0, 0.80, -0.92), Vector3(28, 0, 0))
@@ -337,6 +348,15 @@ func _sphere(radius: float) -> SphereMesh:
 	var mesh := SphereMesh.new()
 	mesh.radius = radius
 	mesh.height = radius * 2.0   # a full sphere (not a half dome)
+	return mesh
+
+
+# A hemisphere (flat circle at the top, rounded below). Used for the udder.
+func _dome(radius: float) -> SphereMesh:
+	var mesh := SphereMesh.new()
+	mesh.radius = radius
+	mesh.height = radius        # half as tall as a full sphere = a dome
+	mesh.is_hemisphere = true
 	return mesh
 
 
