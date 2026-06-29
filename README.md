@@ -3,6 +3,10 @@
 A relaxed little Godot 4.7 sandbox: pilot a flying saucer over an endless
 pasture and beam up cows. No score to beat, no timer — just vibes.
 
+<p align="center">
+  <img src="Capture.JPG" alt="The flying saucer hovering over the pasture, running lights aglow" width="600">
+</p>
+
 ## Controls
 
 | Action | Key |

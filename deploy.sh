@@ -1,5 +1,5 @@
 #!/bin/bash
 
 git add .
-git commit -m "angry farmers, HUD, strobes"
+git commit -m "pic in readme.me"
 git push -u origin main
