@@ -165,6 +165,17 @@ uniform vec3 mtn_near    : source_color = vec3(0.60, 0.66, 0.75); // nearer  = s
 uniform vec3 mtn_far     : source_color = vec3(0.67, 0.73, 0.81); // farther = paler, hazier
 uniform vec3 sun_dir = vec3(0.0, 0.57, 0.82);                     // direction TO the sun (set by World)
 
+// --- Clouds ------------------------------------------------------------------
+// Sampled from 3D domain-warped noise evaluated on the view DIRECTION, not on a
+// projected ground plane — a bounded domain, so there is no horizon stretch and
+// therefore none of the grid/streak aliasing a plane projection produces. Faded
+// out near the horizon and drifting slowly across the sky.
+uniform float cloud_cover : hint_range(0.0, 1.0) = 0.38;  // higher = thicker, more sky covered
+uniform float cloud_scale = 1.9;                          // lower = larger cloud forms
+uniform vec2  cloud_drift = vec2(0.004, 0.0025);          // slow motion (units/sec of TIME)
+uniform vec3  cloud_sun   : source_color = vec3(1.00, 0.98, 0.94); // sunlit tops
+uniform vec3  cloud_shade : source_color = vec3(0.62, 0.66, 0.74); // cool undersides
+
 // A rounded ridge height in [0,1] from INTEGER harmonics of the view azimuth.
 // Every term is exactly 2*PI-periodic in `az`, so the silhouette wraps with no
 // seam. Used for the gentle nearer foothills. `f0` sets how many humps encircle
@@ -203,6 +214,42 @@ vec3 add_range(vec3 col, float elev, float ridge, vec3 range_col) {
 	return mix(col, mc, inside);
 }
 
+// --- Cloud noise: 3D gradient (Perlin-style) fractal noise. Sampled on the view
+// direction so it is continuous over the whole sky with no tiles or seams. -------
+vec3 hash33(vec3 p) {
+	p = vec3(dot(p, vec3(127.1, 311.7, 74.7)),
+			 dot(p, vec3(269.5, 183.3, 246.1)),
+			 dot(p, vec3(113.5, 271.9, 124.6)));
+	return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
+}
+
+float gnoise3(vec3 p) {
+	vec3 i = floor(p);
+	vec3 f = fract(p);
+	vec3 u = f * f * (3.0 - 2.0 * f);
+	return mix(mix(mix(dot(hash33(i + vec3(0,0,0)), f - vec3(0,0,0)),
+					   dot(hash33(i + vec3(1,0,0)), f - vec3(1,0,0)), u.x),
+				   mix(dot(hash33(i + vec3(0,1,0)), f - vec3(0,1,0)),
+					   dot(hash33(i + vec3(1,1,0)), f - vec3(1,1,0)), u.x), u.y),
+			   mix(mix(dot(hash33(i + vec3(0,0,1)), f - vec3(0,0,1)),
+					   dot(hash33(i + vec3(1,0,1)), f - vec3(1,0,1)), u.x),
+				   mix(dot(hash33(i + vec3(0,1,1)), f - vec3(0,1,1)),
+					   dot(hash33(i + vec3(1,1,1)), f - vec3(1,1,1)), u.x), u.y), u.z);
+}
+
+float fbm3(vec3 p) {
+	float v = 0.0;
+	float a = 0.5;
+	for (int i = 0; i < 5; i++) { v += a * gnoise3(p); p *= 2.02; a *= 0.5; }
+	return v;
+}
+
+// Fade clouds to nothing near the horizon (where sampling is tightest) and near
+// the zenith edge of the band, so they never clip into the mountains.
+float cloud_band(float e) {
+	return smoothstep(0.03, 0.15, e) * (1.0 - smoothstep(0.72, 0.96, e));
+}
+
 void sky() {
 	vec3 dir = normalize(EYEDIR);
 	float elev = dir.y;
@@ -227,7 +274,26 @@ void sky() {
 	// ...then the nearer range over it: the original gentle, rounded foothills.
 	col = add_range(col, elev, 0.004 + 0.085 * ridge_h(az, 6.0, 2.5), mtn_near);
 
-	COLOR = col;
+	// Clouds, composited over the sky/mountains. Domain-warped noise on the view
+	// direction (organic, non-repeating), thresholded by cloud_cover so the cores
+	// go opaque and read as solid clouds rather than haze.
+	float bnd = cloud_band(elev);
+	float cov = 0.0;
+	vec3 ccol = col;
+	if (bnd > 0.001) {
+		vec3 cp = dir * cloud_scale + vec3(cloud_drift.x, 0.0, cloud_drift.y) * TIME;
+		vec3 warp = vec3(fbm3(cp + vec3(1.7, 9.2, 3.3)),
+						 fbm3(cp + vec3(5.1, 1.3, 8.8)),
+						 fbm3(cp + vec3(2.9, 6.6, 4.4)));
+		float n = fbm3(cp + 0.75 * warp) * 0.5 + 0.5;
+		float lo = mix(0.62, 0.20, cloud_cover);   // cover raises density by lowering the threshold
+		cov = smoothstep(lo, lo + 0.16, n) * bnd;
+		float sun_amt = clamp(dot(dir, normalize(sun_dir)) * 0.5 + 0.5, 0.0, 1.0);
+		ccol = mix(cloud_shade, cloud_sun, smoothstep(0.1, 0.85, cov));  // two-tone form
+		ccol = mix(ccol, ccol * vec3(1.06, 1.0, 0.9), sun_amt * 0.35);   // warm toward the sun
+	}
+
+	COLOR = mix(col, ccol, clamp(cov, 0.0, 1.0));
 }
 """
 	var mat := ShaderMaterial.new()

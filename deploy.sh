@@ -1,5 +1,5 @@
 #!/bin/bash
 
 git add .
-git commit -m "performance improvements"
+git commit -m "clouds !"
 git push -u origin main
