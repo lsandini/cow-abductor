@@ -33,6 +33,7 @@ var _cur_freq := 520.0 # smoothed base pitch
 var moo_stream: AudioStreamWAV       # handed to every cow
 var bell_stream: AudioStreamWAV      # alpine cowbell; handed to the cows that wear one
 var ding_stream: AudioStreamWAV      # metallic ricochet; handed to the saucer (farmer hits)
+var zap_stream: AudioStreamWAV       # sci-fi death-ray "phaser"; handed to the saucer
 var _bird_stream: AudioStreamWAV
 var _bird_emitters: Array[AudioStreamPlayer3D] = []
 var _bird_countdown := 2.0
@@ -46,6 +47,7 @@ func _ready() -> void:
 	moo_stream = render_moo(RATE)
 	bell_stream = render_bell(RATE)
 	ding_stream = render_ding(RATE)
+	zap_stream = render_zap(RATE)
 	_bird_stream = render_bird_phrase(RATE)
 	_build_whistle()
 
@@ -279,6 +281,32 @@ static func render_ding(rate: int) -> AudioStreamWAV:
 		# ...plus a quick buzzy rattle bleeding through the thin tin.
 		s += (randf() * 2.0 - 1.0) * exp(-t * 30.0) * 0.25 * sin(TAU * 180.0 * t)
 		samples[i] = s
+	samples = _normalize(samples, 0.9)
+	return _pcm16(samples, rate)
+
+
+# Bake the death-ray "phaser": a pronounced descending "peewww" — an exponential
+# pitch glide from ~820 Hz down to ~90 Hz (constant perceptual fall) — buzzed up
+# with deep ~40 Hz ring modulation and square-wave grit, plus a discharge crackle.
+static func render_zap(rate: int) -> AudioStreamWAV:
+	var dur := 0.5
+	var n := int(dur * rate)
+	var samples := PackedFloat32Array()
+	samples.resize(n)
+	var phase := 0.0
+	for i in n:
+		var u := float(i) / float(n)                      # 0..1 through the zap
+		var t := float(i) / float(rate)
+		var f := 820.0 * pow(90.0 / 820.0, u)             # exponential glide down: "peewww"
+		phase += TAU * f / float(rate)
+		var warble := 0.35 + 0.65 * sin(TAU * 40.0 * t)   # deep ring-mod buzz
+		var s := sin(phase) * warble
+		s += 0.32 * signf(sin(phase))                     # square-wave buzz
+		s += 0.16 * signf(sin(phase * 1.5))               # a dissonant partial for rasp
+		if u < 0.05:                                       # crackle at the discharge
+			s += (randf() * 2.0 - 1.0) * (1.0 - u / 0.05) * 0.5
+		var env := clampf(u / 0.012, 0.0, 1.0) * (1.0 - smoothstep(0.62, 1.0, u))
+		samples[i] = s * env
 	samples = _normalize(samples, 0.9)
 	return _pcm16(samples, rate)
 

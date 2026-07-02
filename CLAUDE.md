@@ -55,9 +55,19 @@ it work — preserve both when touching chunk or prop code:
 
 Distance fog (in `World`) + the matching `HORIZON_COLOR` hide the streaming edge;
 the sky is a custom shader (`World._make_sky_material`) drawing a procedural
-mountain backdrop and the sun disc. The sun direction is pushed into the sky
-shader as the `sun_dir` uniform from the actual light's transform — it does *not*
-rely on the renderer's `LIGHT0`.
+mountain backdrop, the sun disc, and drifting **clouds**. The sun direction is
+pushed into the sky shader as the `sun_dir` uniform from the actual light's
+transform — it does *not* rely on the renderer's `LIGHT0`.
+
+The clouds are sampled from **3D domain-warped noise evaluated on the view
+direction** (`EYEDIR`), *not* projected onto a ground plane. This is the crucial
+choice: a plane projection stretches toward infinity at grazing angles and
+aliases the noise lattice into visible grid/streak "tiles" (the failed earlier
+attempt); sampling the bounded direction vector is continuous over the whole sky,
+so there are no tiles or seams at any angle, including the horizon and directly
+behind you. Coverage fades out near the horizon. Tunables: `cloud_cover` (density),
+`cloud_scale` (form size), `cloud_drift` (motion). Because the sky is also the
+scene's reflection/ambient source, the clouds show up on the saucer's chrome.
 
 ### Integration is group-based, not reference-based
 
@@ -71,7 +81,12 @@ Nodes find each other through groups rather than holding references:
   calls `cow.set_pulled(grabbed, self)`; a grabbed cow then rides its own beam.
 - `"farmers"` — herd guards. Each farmer, while the beam is firing within range,
   shoots at the (injected) saucer: a harmless recoil tilt + a metallic ding
-  (`Saucer.register_hit`), never any damage.
+  (`Saucer.register_hit`), never any damage. The saucer's **death ray**
+  (right mouse button) also iterates this group to find the nearest farmer in
+  `death_ray_range` and calls `Farmer.fry()`; a fried farmer drops out of the
+  group (so it is not re-targeted or recycled), plays its electrocute→char→smoke
+  death, and emits `fried` so `World` spawns a replacement (mirroring how a
+  captured cow respawns).
 
 Trees are no longer scene nodes (see Terrain below), so there is no `"trees"`
 group: the minimap reads their world positions from
@@ -89,9 +104,9 @@ the herd.
 | --- | --- |
 | `scripts/World.gd` | Assembles sky/fog, sun, lighting, audio, saucer, herd, UI; registers input; sky shader; cow recycling. |
 | `scripts/Terrain.gd` | Infinite streaming world: height/biome noise, chunk build/free, props, water. The height authority. Props (trees/rocks/bushes/fences) render as per-chunk **MultiMesh** instances off canonical shared meshes; chunk mesh normals come from one pre-sampled height grid. |
-| `scripts/Saucer.gd` | Flight, orbit camera (mouse look), banking/yaw-to-travel, tractor beam; `register_hit` recoil + ding. |
+| `scripts/Saucer.gd` | Flight, orbit camera (mouse look), banking/yaw-to-travel, tractor beam; `register_hit` recoil + ding; **death ray** (right-click) that fries the nearest farmer in range with a red bolt + phaser zap. |
 | `scripts/Cow.gd` | Wander AI, slope orientation, water avoidance, getting abducted — a **spring-damper** beam ride (vertical lift + pendulum swing) ending in the `captured` signal. |
-| `scripts/Farmer.gd` | Herd guard: tracks the saucer, fires an old rifle (muzzle flash + slow visible bullet) while it beams nearby cows. |
+| `scripts/Farmer.gd` | Herd guard: tracks the saucer, fires an old rifle (muzzle flash + slow visible bullet) while it beams nearby cows. `fry()` runs the death-ray death (electrocution strobe → char black → smoke puff) and emits `fried`. |
 | `scripts/Minimap.gd` | Bottom-right radar; saucer-relative, redrawn every frame. |
 | `scripts/HeadingTape.gd` | Top-of-screen semitransparent compass ribbon; reads heading from the saucer's planar facing. |
 | `scripts/FlightReadouts.gd` | Light HUD speed (left) + altitude (right) readouts; reads `get_speed()` / `get_altitude()` off the saucer. |
@@ -102,10 +117,12 @@ the herd.
 
 `Audio.gd` mixes two techniques: the UFO whistle is **live-synthesized** every
 frame into an `AudioStreamGenerator` (so it can react to the beam), while the moo,
-cowbell, bird chirps and the farmer-hit ding are **baked once** into
-`AudioStreamWAV` buffers from raw PCM. Cows share the single baked moo sample;
+cowbell, bird chirps, the farmer-hit ding and the death-ray zap are **baked once**
+into `AudioStreamWAV` buffers from raw PCM. Cows share the single baked moo sample;
 only some cows wear a bell (the shared baked `bell_stream`); the saucer holds the
-shared `ding_stream` and plays it from `register_hit`.
+shared `ding_stream` (played from `register_hit`) and `zap_stream` (played from
+the death ray). The zap (`render_zap`) is a descending "peewww" pitch glide given
+its buzz by ring modulation + square-wave grit.
 
 New baked sounds are prototyped in `SoundLab.gd` (run `scenes/SoundLab.tscn`
 on its own), which auditions code-synthesised recipes through the same 3D path a

@@ -402,6 +402,11 @@ func _on_saucer_hit() -> void:
 	_update_hud()
 
 
+# A farmer was fried by the death ray: send in a fresh guard so the herd stays watched.
+func _on_farmer_fried() -> void:
+	_spawn_one_farmer()
+
+
 # -----------------------------------------------------------------------------
 # Farmers: a handful of guards that stand among the cows and shoot at the saucer
 # (harmlessly) when it tries to beam one up. Like the cows they follow the player
@@ -419,6 +424,7 @@ func _spawn_one_farmer() -> void:
 	farmer.saucer = _saucer   # cached ref instead of a per-frame group lookup
 	farmer.position = _farmer_position()
 	farmer.add_to_group("farmers")
+	farmer.fried.connect(_on_farmer_fried)   # send in a fresh guard when this one is fried
 	add_child(farmer)
 
 
@@ -471,6 +477,7 @@ func _build_saucer() -> void:
 	# use it for the starting altitude.
 	_saucer.ground_sampler = Callable(_terrain, "get_height")
 	_saucer.ding_stream = _audio.ding_stream   # metallic "ding" when a farmer's shot lands
+	_saucer.zap_stream = _audio.zap_stream     # phaser "zap" for the death ray
 	_saucer.add_to_group("saucer")
 	add_child(_saucer)
 	_saucer.hit.connect(_on_saucer_hit)   # tally rifle hits for the HUD
@@ -540,4 +547,4 @@ func _update_hud() -> void:
 	@warning_ignore("integer_division")   # whole minutes for the M:SS clock is intended
 	var minutes := int(_elapsed) / 60
 	var seconds := int(_elapsed) % 60
-	_hud_label.text = "Cows abducted: %d\nHits taken: %d\nTime: %d:%02d\n\nWASD  move\nZ / X  altitude\nMouse  look\nSpace / Left-click  tractor beam\nEsc  free the mouse" % [_captured_count, _hits_taken, minutes, seconds]
+	_hud_label.text = "Cows abducted: %d\nHits taken: %d\nTime: %d:%02d\n\nWASD  move\nZ / X  altitude\nMouse  look\nSpace / Left-click  tractor beam\nRight-click  death ray\nEsc  free the mouse" % [_captured_count, _hits_taken, minutes, seconds]

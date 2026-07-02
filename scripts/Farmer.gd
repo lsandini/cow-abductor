@@ -20,6 +20,10 @@
 class_name Farmer
 extends Node3D
 
+# Emitted once this farmer has fully disintegrated under the death ray (see fry()).
+# The World listens so it can send in a replacement and keep the guard count steady.
+signal fried
+
 # --- Behaviour tuning --------------------------------------------------------
 @export var fire_range: float = 55.0        # only tracks/shoots a saucer within this
 @export var fire_interval_min: float = 1.2  # seconds between shots (randomised)...
@@ -42,6 +46,8 @@ var saucer: Saucer = null
 var _aim: Node3D
 var _muzzle: MeshInstance3D                 # tip of the barrel (tracer origin)
 var _cooldown: float = 0.0                  # time until he may fire again
+var _dying: bool = false                    # true once fried: stop tracking/shooting
+var _base_pos: Vector3                       # spot he's standing on, for the electrocution jitter
 
 const SHOULDER_HEIGHT: float = 1.4          # local height of the aim pivot
 const REST_AIM: float = 0.35                # rifle angle (rad) when lowered/idle
@@ -57,6 +63,8 @@ func _ready() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	if _dying:
+		return   # being fried — no more tracking or shooting
 	if saucer == null or not is_instance_valid(saucer):
 		return
 
@@ -83,6 +91,97 @@ func _physics_process(delta: float) -> void:
 	if saucer.beam_active and _cooldown <= 0.0:
 		_fire(saucer)
 		_cooldown = randf_range(fire_interval_min, fire_interval_max)
+
+
+# -----------------------------------------------------------------------------
+# Getting fried by the saucer's death ray: char black for a beat, then vanish in
+# a quick puff of smoke and emit `fried` so the World sends in a replacement.
+# -----------------------------------------------------------------------------
+func fry() -> void:
+	if _dying:
+		return
+	_dying = true
+	remove_from_group("farmers")   # no longer a live guard: skip recycling / re-targeting
+	_base_pos = position
+	var tw := create_tween()
+	# 1) Struck by cartoon lightning: strobe bright electric white/blue with a
+	#    fizzing jitter, like he's being electrocuted on the spot.
+	for i in 8:
+		tw.tween_callback(_flash.bind(true))
+		tw.tween_interval(0.05)
+		tw.tween_callback(_flash.bind(false))
+		tw.tween_interval(0.05)
+	# 2) Burnt to a crisp: settle to solid black and smoulder for a beat.
+	tw.tween_callback(_char_black)
+	tw.tween_interval(0.7)
+	# 3) Crumble away in a puff of smoke.
+	tw.tween_callback(_disintegrate)
+
+
+# One frame of the electrocution strobe: blinding white or electric blue, glowing
+# and unshaded, with a small jitter around the spot he's standing on.
+func _flash(bright: bool) -> void:
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.albedo_color = Color(1.0, 1.0, 1.0) if bright else Color(0.55, 0.8, 1.0)
+	m.emission_enabled = true
+	m.emission = m.albedo_color
+	m.emission_energy_multiplier = 4.0
+	_override_all(self, m)
+	position = _base_pos + Vector3(randf_range(-0.07, 0.07), 0.0, randf_range(-0.07, 0.07))
+
+
+# Swap every body part to a burnt-black material and settle back onto his spot.
+func _char_black() -> void:
+	position = _base_pos
+	var burnt := StandardMaterial3D.new()
+	burnt.albedo_color = Color(0.03, 0.03, 0.03)
+	burnt.roughness = 1.0
+	_override_all(self, burnt)
+
+
+func _override_all(n: Node, mat: Material) -> void:
+	for c in n.get_children():
+		if c is MeshInstance3D:
+			(c as MeshInstance3D).material_override = mat
+		_override_all(c, mat)
+
+
+# A puff of smoke, then the charred body crumbles to nothing and is freed.
+func _disintegrate() -> void:
+	_spawn_smoke()
+	var tw := create_tween()
+	tw.tween_property(self, "scale", scale * 0.02, 0.3).set_ease(Tween.EASE_IN)
+	tw.tween_callback(func() -> void:
+		fried.emit()
+		queue_free())
+
+
+# A little cloud of grey puffs that balloon, rise and fade — spawned into the
+# World (our parent) so they outlive the farmer as it frees itself.
+func _spawn_smoke() -> void:
+	var base := global_position
+	for i in 7:
+		var puff := MeshInstance3D.new()
+		var m := SphereMesh.new()
+		m.radius = randf_range(0.35, 0.6)
+		m.height = m.radius * 2.0
+		puff.mesh = m
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(0.30, 0.29, 0.28, 0.7)
+		mat.roughness = 1.0
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		puff.material_override = mat
+		get_parent().add_child(puff)
+		puff.global_position = base + Vector3(
+			randf_range(-0.5, 0.5), randf_range(0.4, 1.5), randf_range(-0.5, 0.5))
+		var life := randf_range(0.5, 0.9)
+		var tw := puff.create_tween()
+		tw.set_parallel(true)
+		tw.tween_property(puff, "scale", Vector3.ONE * randf_range(2.0, 3.2), life)
+		tw.tween_property(puff, "global_position:y", puff.global_position.y + randf_range(1.5, 2.6), life)
+		tw.tween_property(mat, "albedo_color:a", 0.0, life)
+		tw.chain().tween_callback(puff.queue_free)
 
 
 # Take a shot: muzzle flash + a slow, visible bullet. On a hit the bullet jolts

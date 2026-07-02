@@ -46,6 +46,10 @@ var _cam_distance: float = 14.0            # current camera boom length (starts 
 @export var beam_ring_speed: float = 0.4   # how fast a ring slides top->bottom (cycles/sec)
 @export var beam_ring_color: Color = Color(0.5, 0.95, 1.0, 0.9)  # rgb tint; a = peak brightness
 
+# --- Death ray (right mouse button: fries the nearest farmer in range) --------
+@export var death_ray_range: float = 30.0   # horizontal reach to the nearest farmer
+@export var death_ray_color: Color = Color(1.0, 0.12, 0.08)
+
 # --- Rim running lights (two spots circle the rim in opposite directions) -----
 @export var rim_runner_speed: float = 0.55      # laps per second each runner travels
 @export var rim_base_brightness: float = 0.4    # how lit an idle rim light is
@@ -78,6 +82,8 @@ var _velocity: Vector3 = Vector3.ZERO        # horizontal flight velocity, eased
 # --- Hit reaction (farmers' rifle fire — purely cosmetic, does NO damage) -----
 var ding_stream: AudioStream                # baked metallic "ding"; set by World
 var _ding_player: AudioStreamPlayer3D
+var zap_stream: AudioStream                 # baked death-ray "phaser"; set by World
+var _zap_player: AudioStreamPlayer3D
 # A damped-spring tilt added on top of the body's flight lean when a shot lands,
 # so the disc lurches and settles. Only the visible body is affected — the camera
 # rig and flight are untouched, which is what makes the hit harmless.
@@ -109,6 +115,15 @@ func _ready() -> void:
 		_ding_player.max_distance = 140.0
 		_ding_player.unit_size = 22.0
 		add_child(_ding_player)
+
+	# And a voice for the death-ray zap.
+	if zap_stream != null:
+		_zap_player = AudioStreamPlayer3D.new()
+		_zap_player.stream = zap_stream
+		_zap_player.volume_db = -11.0
+		_zap_player.max_distance = 160.0
+		_zap_player.unit_size = 22.0
+		add_child(_zap_player)
 
 
 # -----------------------------------------------------------------------------
@@ -304,6 +319,77 @@ func _handle_beam() -> void:
 
 
 # -----------------------------------------------------------------------------
+# Death ray: right-click zaps the nearest farmer within range with a red bolt,
+# which chars and disintegrates him (see Farmer.fry). Harmless theatre like the
+# rest of the game — it just removes that guard (the World sends in a fresh one).
+# -----------------------------------------------------------------------------
+func _fire_death_ray() -> void:
+	var best = null
+	var best_d2 := death_ray_range * death_ray_range
+	for f in get_tree().get_nodes_in_group("farmers"):
+		var dx: float = f.global_position.x - global_position.x
+		var dz: float = f.global_position.z - global_position.z
+		var d2 := dx * dx + dz * dz
+		if d2 < best_d2:
+			best_d2 = d2
+			best = f
+	if best == null:
+		return   # no farmer close enough
+	_play_zap()
+	_spawn_death_ray(best.global_position + Vector3(0.0, 1.2, 0.0))
+	best.fry()
+
+
+func _play_zap() -> void:
+	if _zap_player == null:
+		return
+	_zap_player.pitch_scale = randf_range(0.95, 1.1)
+	_zap_player.play()
+
+
+# A brief bright-red bolt from the saucer's underside to the target, spawned into
+# the world (so it stays put as the saucer drifts) and fading out fast.
+func _spawn_death_ray(target: Vector3) -> void:
+	var from := global_position + Vector3(0.0, -0.8, 0.0)
+	var seg := target - from
+	var dist := seg.length()
+	if dist < 0.01:
+		return
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = 0.15
+	mesh.bottom_radius = 0.15
+	mesh.height = dist
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = death_ray_color
+	mat.emission_enabled = true
+	mat.emission = death_ray_color
+	mat.emission_energy_multiplier = 6.0
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	var inst := MeshInstance3D.new()
+	inst.mesh = mesh
+	inst.material_override = mat
+	get_parent().add_child(inst)
+	# A cylinder's long axis is local +Y, so aim +Y along the bolt and centre it.
+	inst.global_transform = Transform3D(_basis_from_y(seg / dist), (from + target) * 0.5)
+	var tw := inst.create_tween()
+	tw.tween_interval(0.06)                                # a beat of full-bright bolt
+	tw.tween_property(mat, "albedo_color:a", 0.0, 0.18)    # then fade the bolt away
+	tw.parallel().tween_property(mat, "emission_energy_multiplier", 0.0, 0.18)
+	tw.tween_callback(inst.queue_free)
+
+
+# An orthonormal basis whose +Y axis points along `y` (for orienting the bolt).
+func _basis_from_y(y: Vector3) -> Basis:
+	var up := y.normalized()
+	var ref_axis := Vector3.RIGHT if absf(up.dot(Vector3.RIGHT)) < 0.99 else Vector3.FORWARD
+	var x := ref_axis.cross(up).normalized()
+	var z := x.cross(up).normalized()
+	return Basis(x, up, z)
+
+
+# -----------------------------------------------------------------------------
 # Mouse look + Esc to release the cursor.
 # -----------------------------------------------------------------------------
 func _unhandled_input(event: InputEvent) -> void:
@@ -319,6 +405,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			_cam_distance = clampf(_cam_distance + zoom_step, zoom_min, zoom_max)
 			_camera.position.z = _cam_distance
+		elif event.button_index == MOUSE_BUTTON_RIGHT and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			_fire_death_ray()   # zap the nearest farmer in range
 	elif event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
 		# Toggle the mouse between captured (look) and free (desktop cursor).
 		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:

@@ -15,12 +15,16 @@ pasture and beam up cows. No score to beat, no timer — just vibes.
 | Altitude | `Z` up / `X` down |
 | Look around | Mouse |
 | Tractor beam | `Space` or **Left mouse button** (hold) |
+| Death ray | **Right mouse button** (fry the nearest farmer in range) |
 | Free the mouse cursor | `Esc` (press again to recapture) |
 
 Hover over a cow, hold the beam, and it floats up into the saucer. Watch out for
 **angry farmers** (red on the minimap): they stand guard among the herd and take
 potshots at you with an old rifle when you beam their cows — harmless, but each
-hit gives the saucer a jolt and a metallic *ding*. The minimap in the
+hit gives the saucer a jolt and a metallic *ding*. Fed up with one? A tap of the
+**right mouse button** fires a red **death ray** that fries the nearest farmer in
+range: he's struck by a cartoon-lightning zap, chars black, and vanishes in a
+puff of smoke (a fresh guard soon wanders in to take his place). The minimap in the
 bottom-right shows nearby cows (white), farmers (red), trees (green), your
 heading (yellow arrow) and the beam's reach (cyan ring) while firing; a compass
 tape across the top of the screen reads your current heading, with speed and
@@ -45,20 +49,27 @@ RNG, so flying away and back finds the same scenery in the same place. The herd
 of cows follows you, drifting back into view whenever it strays too far — and a
 few farmers tag along beside it to defend their livestock.
 
+The sky is a shader too: a gradient with distant mountain ridgelines, a sun, and
+soft drifting cumulus clouds. The clouds are sampled from 3D noise along the view
+direction (not projected onto a plane), so they never tile or seam no matter
+which way you look — and since the sky doubles as the scene's reflection source,
+they even glint off the saucer's chrome hull.
+
 | File | Role |
 | --- | --- |
 | `scenes/Main.tscn` | Empty entry scene carrying `World.gd`. |
 | `scripts/World.gd` | Assembles the sky/fog, lighting, audio, saucer, herd and UI. Registers the input actions. |
 | `scripts/Terrain.gd` | The infinite world: height/biome noise, chunk streaming, props and water. |
-| `scripts/Saucer.gd` | Flight, orbit camera, tractor beam, and the harmless hit reaction. |
+| `scripts/Saucer.gd` | Flight, orbit camera, tractor beam, death ray, and the harmless hit reaction. |
 | `scripts/Cow.gd` | Cow wandering AI + getting abducted. |
-| `scripts/Farmer.gd` | Rifle-toting herd guards that shoot at the saucer. |
+| `scripts/Farmer.gd` | Rifle-toting herd guards that shoot at the saucer — and get fried by the death ray. |
 | `scripts/Minimap.gd` | The bottom-right radar. |
 | `scripts/HeadingTape.gd` | The compass heading tape across the top of the screen. |
 | `scripts/FlightReadouts.gd` | The speed and altitude readouts flanking the compass tape. |
-| `scripts/Audio.gd` | Procedural sound: live UFO whistle + baked moo, bell, bird and ding samples. |
+| `scripts/Audio.gd` | Procedural sound: live UFO whistle + baked moo, bell, bird, ding and death-ray zap samples. |
 
 Handy things to tweak live in the **Inspector** (or at the top of each script):
-saucer `move_speed` / `fly_height` / `beam_radius`, World `cow_count` /
-`fog_density`, and Terrain `chunk_size` / `view_radius` / `mountain_amplitude` /
+saucer `move_speed` / `fly_height` / `beam_radius` / `death_ray_range`, World
+`cow_count` / `fog_density`, the sky shader's `cloud_cover` / `cloud_scale` /
+`cloud_drift`, and Terrain `chunk_size` / `view_radius` / `mountain_amplitude` /
 `biome_frequency` / `water_level`.
