@@ -537,6 +537,7 @@ func _build_ui() -> void:
 
 func _update_hud() -> void:
 	_last_hud_second = int(_elapsed)
+	@warning_ignore("integer_division")   # whole minutes for the M:SS clock is intended
 	var minutes := int(_elapsed) / 60
 	var seconds := int(_elapsed) % 60
 	_hud_label.text = "Cows abducted: %d\nHits taken: %d\nTime: %d:%02d\n\nWASD  move\nZ / X  altitude\nMouse  look\nSpace / Left-click  tractor beam\nEsc  free the mouse" % [_captured_count, _hits_taken, minutes, seconds]
