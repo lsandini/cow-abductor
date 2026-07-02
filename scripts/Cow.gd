@@ -26,15 +26,26 @@ signal captured
 var water_level: float = -1000.0
 
 # --- Abduction tuning --------------------------------------------------------
-@export var pull_rise: float = 6.0         # vertical lift speed inside the beam
-@export var pull_lateral: float = 4.0      # how fast it centres under the saucer
+# The lift is a spring-damper toward a rest point just below the saucer, so the
+# cow accelerates up, trails and swings when the saucer moves, then settles —
+# rather than sliding up at a constant rate.
+@export var lift_stiffness: float = 14.0   # vertical spring toward the carry point
+@export var lift_damping: float = 7.0      # near-critical (2*sqrt(14) ~= 7.5): brisk rise, little bob
+@export var swing_stiffness: float = 10.0  # horizontal pull toward the beam axis
+@export var swing_damping: float = 1.8     # low on purpose: the cow pendulums as the saucer moves
+@export var carry_gap: float = 1.2         # rest point sits this far below the saucer centre
+@export var capture_height: float = 0.35   # risen to within this of the carry point...
+@export var capture_radius: float = 1.0    # ...and this close to the beam axis = captured
+@export var beam_max_speed: float = 30.0   # cap so a very tall lift never turns ballistic
 @export var spin_speed: float = 8.0        # whirl while being lifted (rad/s)
 @export var fall_speed: float = 12.0       # drop speed if the beam lets go
-@export var capture_distance: float = 1.6  # close enough to the saucer = captured
+@export var capture_distance: float = 1.6  # legacy fallback capture sphere (for fast flybys)
 
 # Beam state, refreshed every frame by the saucer via set_pulled().
 var _pulled: bool = false
 var _saucer: Node3D = null
+var _beam_vel: Vector3 = Vector3.ZERO      # integrated velocity while riding the beam
+var _heaviness: float = 1.0                # per-cow mass: >1 lifts lazier and swings wider
 
 # Supplied by the World: ground_sampler.call(x, z) -> terrain height. Lets the
 # cow walk over hills and valleys and land back on the slope after a near-miss.
@@ -66,6 +77,8 @@ func _ready() -> void:
 	# about the origin keeps the hooves planted on the ground (lowest point y=0).
 	_size = randf_range(0.88, 1.12)
 	scale = Vector3.ONE * _size
+	# Bigger cows are heavier: they lift more sluggishly and swing wider in the beam.
+	_heaviness = remap(_size, 0.88, 1.12, 0.85, 1.3)
 	_build_body()
 	_build_audio()
 	_pick_new_action()
@@ -101,8 +114,9 @@ func _build_audio() -> void:
 # Called by the saucer each frame: are we in the beam, and which saucer is it?
 func set_pulled(pulled: bool, saucer: Node3D) -> void:
 	if pulled and not _pulled:
-		_moo(true)   # just got grabbed -> a startled, higher-pitched moo
-		_clonk()     # and a jolt of the bell as it's yanked off its feet
+		_moo(true)              # just got grabbed -> a startled, higher-pitched moo
+		_clonk()                # and a jolt of the bell as it's yanked off its feet
+		_beam_vel = Vector3.ZERO  # start the ride from rest, even on a re-grab
 	_pulled = pulled
 	_saucer = saucer
 
@@ -207,18 +221,31 @@ func _orient_on_slope(delta: float) -> void:
 
 # --- Being abducted ----------------------------------------------------------
 func _ride_beam(delta: float) -> void:
-	var target := _saucer.global_position
+	# Rest point sits a little below the saucer so the cow hangs in the beam rather
+	# than clipping up into the hull.
+	var target := _saucer.global_position - Vector3(0.0, carry_gap, 0.0)
+	var to_target := target - global_position
 
-	# Slide horizontally toward the saucer's centre and rise toward it.
-	global_position.x = lerp(global_position.x, target.x, clamp(pull_lateral * delta, 0.0, 1.0))
-	global_position.z = lerp(global_position.z, target.z, clamp(pull_lateral * delta, 0.0, 1.0))
-	global_position.y = move_toward(global_position.y, target.y, pull_rise * delta)
+	# Spring-damper with heaviness as mass (a = F/m): heavy cows lift lazily and
+	# swing wide, light ones zip up. Horizontal damping is deliberately low — the
+	# pendulum swing as the saucer moves IS the effect we want.
+	var acc := Vector3(
+		(swing_stiffness * to_target.x - swing_damping * _beam_vel.x) / _heaviness,
+		(lift_stiffness * to_target.y - lift_damping * _beam_vel.y) / _heaviness,
+		(swing_stiffness * to_target.z - swing_damping * _beam_vel.z) / _heaviness)
+	_beam_vel = (_beam_vel + acc * delta).limit_length(beam_max_speed)
+	global_position += _beam_vel * delta   # semi-implicit Euler: stable at 60 Hz
 
 	# Helpless spinning + a little wobble for comedic effect.
 	rotate_y(spin_speed * delta)
-	rotation.z = lerp(rotation.z, 0.5, delta * 3.0)
+	rotation.z = lerp(rotation.z, 0.5, clampf(delta * 3.0, 0.0, 1.0))
 
-	if global_position.distance_to(target) <= capture_distance:
+	# Capture is a REST test — risen to the carry point and roughly centred on the
+	# beam axis — so a settled cow can never dangle uncaptured regardless of its
+	# mass. The old distance sphere stays as a fallback for fast flybys.
+	var horiz := Vector2(to_target.x, to_target.z).length()
+	if (global_position.y >= target.y - capture_height and horiz <= capture_radius) \
+			or global_position.distance_to(_saucer.global_position) <= capture_distance:
 		captured.emit()
 		queue_free()
 

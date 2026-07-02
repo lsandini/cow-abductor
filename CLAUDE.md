@@ -63,14 +63,19 @@ rely on the renderer's `LIGHT0`.
 
 Nodes find each other through groups rather than holding references:
 
-- `"saucer"` — the player. The minimap and audio look it up via
-  `get_first_node_in_group("saucer")`.
+- `"saucer"` — the player. Looked up via `get_first_node_in_group("saucer")` by
+  the compass/altitude readouts; the minimap, audio and farmers instead receive
+  the saucer by injection from `World` (cached — it's a session singleton — to
+  avoid a per-frame group scan).
 - `"cows"` — every cow. The saucer iterates this group each physics frame and
   calls `cow.set_pulled(grabbed, self)`; a grabbed cow then rides its own beam.
-- `"farmers"` — herd guards. Each farmer looks up the `"saucer"` each physics
-  frame and, while the beam is firing within range, shoots at it: a harmless
-  recoil tilt + a metallic ding (`Saucer.register_hit`), never any damage.
-- `"trees"` — used by the minimap (and historically birdsong).
+- `"farmers"` — herd guards. Each farmer, while the beam is firing within range,
+  shoots at the (injected) saucer: a harmless recoil tilt + a metallic ding
+  (`Saucer.register_hit`), never any damage.
+
+Trees are no longer scene nodes (see Terrain below), so there is no `"trees"`
+group: the minimap reads their world positions from
+`Terrain.get_tree_position_chunks()` via an injected `terrain` reference.
 
 The cows form a **follow-the-player herd**: `World._recycle_cows()` relocates any
 cow that drifts past `cow_despawn_radius` to a ring around the saucer, so the
@@ -83,9 +88,9 @@ the herd.
 | File | Role |
 | --- | --- |
 | `scripts/World.gd` | Assembles sky/fog, sun, lighting, audio, saucer, herd, UI; registers input; sky shader; cow recycling. |
-| `scripts/Terrain.gd` | Infinite streaming world: height/biome noise, chunk build/free, props, water. The height authority. |
+| `scripts/Terrain.gd` | Infinite streaming world: height/biome noise, chunk build/free, props, water. The height authority. Props (trees/rocks/bushes/fences) render as per-chunk **MultiMesh** instances off canonical shared meshes; chunk mesh normals come from one pre-sampled height grid. |
 | `scripts/Saucer.gd` | Flight, orbit camera (mouse look), banking/yaw-to-travel, tractor beam; `register_hit` recoil + ding. |
-| `scripts/Cow.gd` | Wander AI, slope orientation, water avoidance, getting abducted (`captured` signal). |
+| `scripts/Cow.gd` | Wander AI, slope orientation, water avoidance, getting abducted — a **spring-damper** beam ride (vertical lift + pendulum swing) ending in the `captured` signal. |
 | `scripts/Farmer.gd` | Herd guard: tracks the saucer, fires an old rifle (muzzle flash + slow visible bullet) while it beams nearby cows. |
 | `scripts/Minimap.gd` | Bottom-right radar; saucer-relative, redrawn every frame. |
 | `scripts/HeadingTape.gd` | Top-of-screen semitransparent compass ribbon; reads heading from the saucer's planar facing. |

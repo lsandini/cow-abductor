@@ -37,6 +37,7 @@ const HORIZON_COLOR := Color(0.74, 0.80, 0.86)
 var _captured_count: int = 0           # running tally of abducted cows
 var _hits_taken: int = 0               # running tally of farmer rifle hits taken
 var _elapsed: float = 0.0              # seconds since the session started
+var _last_hud_second: int = -1         # last whole-second the HUD text was rebuilt at
 var _hud_label: Label                  # top-left status text
 var _terrain: Terrain                  # the streaming, infinite world
 var _saucer: Saucer                    # the player (cows/birds gather around it)
@@ -68,7 +69,11 @@ func _process(delta: float) -> void:
 	_elapsed += delta
 	_recycle_cows()
 	_recycle_farmers()   # after the cows, so farmers relocate beside the gathered herd
-	_update_hud()
+	# The only per-frame-changing HUD value is the clock, and it only ticks whole
+	# seconds — so rebuild the label at most once a second instead of every frame.
+	# Counts refresh instantly via their own _update_hud() calls (capture / hit).
+	if int(_elapsed) != _last_hud_second:
+		_update_hud()
 
 
 # -----------------------------------------------------------------------------
@@ -325,9 +330,10 @@ func _on_cow_captured() -> void:
 	_spawn_one_cow()   # keep the world populated — there is no "running out".
 
 
-# A farmer's rifle shot landed (harmless): just bump the HUD tally.
+# A farmer's rifle shot landed (harmless): bump the HUD tally and refresh it now.
 func _on_saucer_hit() -> void:
 	_hits_taken += 1
+	_update_hud()
 
 
 # -----------------------------------------------------------------------------
@@ -344,6 +350,7 @@ func _spawn_one_farmer() -> void:
 	var farmer := Farmer.new()
 	farmer.ground_sampler = Callable(_terrain, "get_height")
 	farmer.water_level = _terrain.water_level
+	farmer.saucer = _saucer   # cached ref instead of a per-frame group lookup
 	farmer.position = _farmer_position()
 	farmer.add_to_group("farmers")
 	add_child(farmer)
@@ -401,6 +408,7 @@ func _build_saucer() -> void:
 	_saucer.add_to_group("saucer")
 	add_child(_saucer)
 	_saucer.hit.connect(_on_saucer_hit)   # tally rifle hits for the HUD
+	_audio.saucer = _saucer   # cached ref: the whistle reads beam_active every frame
 
 
 # -----------------------------------------------------------------------------
@@ -415,6 +423,8 @@ func _build_ui() -> void:
 	# Minimap, pinned to the bottom-right corner with a 20px margin.
 	var minimap := Minimap.new()
 	minimap.name = "Minimap"
+	minimap.saucer = _saucer      # cached refs instead of per-frame group scans
+	minimap.terrain = _terrain    # tree positions for the radar dots
 	minimap.anchor_left = 1.0
 	minimap.anchor_top = 1.0
 	minimap.anchor_right = 1.0
@@ -460,6 +470,7 @@ func _build_ui() -> void:
 
 
 func _update_hud() -> void:
+	_last_hud_second = int(_elapsed)
 	var minutes := int(_elapsed) / 60
 	var seconds := int(_elapsed) % 60
 	_hud_label.text = "Cows abducted: %d\nHits taken: %d\nTime: %d:%02d\n\nWASD  move\nZ / X  altitude\nMouse  look\nSpace / Left-click  tractor beam\nEsc  free the mouse" % [_captured_count, _hits_taken, minutes, seconds]

@@ -70,9 +70,26 @@ var _current_chunk := Vector2i(2147483647, 2147483647)  # forces a first refresh
 var _ground_material: ShaderMaterial       # shared by every chunk's ground mesh
 var _water: MeshInstance3D
 
-# Shared prop materials (cached so we don't allocate one per tree/rock).
+# Shared prop materials (cached so we don't allocate one per tree/rock/bush).
 var _trunk_mat: StandardMaterial3D
 var _rock_mat: StandardMaterial3D
+var _leaf_mat: StandardMaterial3D    # tree foliage; per-tree green rides in the instance colour
+var _bush_mat: StandardMaterial3D    # bush blobs; per-bush green rides in the instance colour
+var _fence_mat: StandardMaterial3D   # split-rail fence (a constant brown, shared by every chalet)
+
+# Canonical prop meshes, shared by every chunk's MultiMeshes so a chunk build
+# allocates NO mesh or material resources — it only writes per-instance
+# transforms/colours into a handful of MultiMeshInstance3Ds (one draw call each).
+var _trunk_mesh: CylinderMesh
+var _leaf_mesh: CylinderMesh          # foliage cone (top_radius 0)
+var _rock_lump_mesh: SphereMesh       # unit sphere; per-lump radius/squash via instance scale
+var _bush_blob_mesh: SphereMesh       # unit sphere; per-blob radius via instance scale
+var _post_mesh: BoxMesh               # fence post
+var _rail_mesh: BoxMesh               # fence rail, unit-length in X (instance scales X to the span)
+
+# World-space tree positions per loaded chunk, so the minimap can still draw tree
+# dots now that trees are MultiMesh instances rather than individual nodes.
+var _tree_positions: Dictionary = {}   # Vector2i -> PackedVector3Array
 
 
 func _ready() -> void:
@@ -81,7 +98,40 @@ func _ready() -> void:
 	_ground_material = _make_ground_material()
 	_trunk_mat = _solid_material(Color(0.40, 0.26, 0.13))
 	_rock_mat = _solid_material(Color(0.42, 0.40, 0.38))
+	_leaf_mat = _vertex_color_material()
+	_bush_mat = _vertex_color_material()
+	_fence_mat = _solid_material(Color(0.40, 0.29, 0.19))
+	_build_canonical_meshes()
 	_build_water()
+
+
+# The one-time canonical prop meshes. Dimensions mirror the old per-prop builders
+# exactly, so silhouettes are unchanged; per-instance size variation that used to
+# live in the mesh (rock/bush radius) now rides in the instance transform's scale.
+func _build_canonical_meshes() -> void:
+	_trunk_mesh = CylinderMesh.new()
+	_trunk_mesh.top_radius = 0.3
+	_trunk_mesh.bottom_radius = 0.4
+	_trunk_mesh.height = 2.5
+
+	_leaf_mesh = CylinderMesh.new()
+	_leaf_mesh.top_radius = 0.0
+	_leaf_mesh.bottom_radius = 2.0
+	_leaf_mesh.height = 4.0
+
+	_rock_lump_mesh = SphereMesh.new()   # unit sphere (radius 1)
+	_rock_lump_mesh.radius = 1.0
+	_rock_lump_mesh.height = 2.0
+
+	_bush_blob_mesh = SphereMesh.new()   # unit sphere (radius 1)
+	_bush_blob_mesh.radius = 1.0
+	_bush_blob_mesh.height = 2.0
+
+	_post_mesh = BoxMesh.new()
+	_post_mesh.size = Vector3(0.16, 1.5, 0.16)
+
+	_rail_mesh = BoxMesh.new()
+	_rail_mesh.size = Vector3(1.0, 0.12, 0.08)   # unit length in X; instance scales it to the span
 
 
 # Configure the three noise fields. The base field matches the original gentle
@@ -128,14 +178,6 @@ func get_height(x: float, z: float) -> float:
 # grass colour (via vertex colour) and how many trees vs rocks a chunk scatters.
 func get_biome(x: float, z: float) -> float:
 	return clampf(_biome.get_noise_2d(x, z) * 0.5 + 0.5, 0.0, 1.0)
-
-
-# Upward surface normal at (x, z) from central differences on the height field.
-func _ground_normal(x: float, z: float) -> Vector3:
-	var e := 1.0
-	var hx := get_height(x - e, z) - get_height(x + e, z)
-	var hz := get_height(x, z - e) - get_height(x, z + e)
-	return Vector3(hx, 2.0 * e, hz).normalized()
 
 
 # -----------------------------------------------------------------------------
@@ -187,17 +229,24 @@ func _refresh_desired() -> void:
 		if absi(coord.x - tc.x) > view_radius + 1 or absi(coord.y - tc.y) > view_radius + 1:
 			_chunks[coord].queue_free()
 			_chunks.erase(coord)
+			_tree_positions.erase(coord)   # drop the freed chunk's minimap tree dots
 
 	# Drop any queued-but-now-too-far coords.
 	_build_queue = _build_queue.filter(func(c):
 		return absi(c.x - tc.x) <= view_radius and absi(c.y - tc.y) <= view_radius)
 
-	# Queue everything in range we don't already have / haven't queued.
+	# Queue everything in range we don't already have / haven't queued. A local set
+	# mirrors the queue so the membership test is O(1) instead of a linear scan per
+	# candidate (the double loop probes (2*view_radius+1)^2 coords every refresh).
+	var queued := {}
+	for c in _build_queue:
+		queued[c] = true
 	for dz in range(-view_radius, view_radius + 1):
 		for dx in range(-view_radius, view_radius + 1):
 			var c := Vector2i(tc.x + dx, tc.y + dz)
-			if not _chunks.has(c) and not _build_queue.has(c):
+			if not _chunks.has(c) and not queued.has(c):
 				_build_queue.append(c)
+				queued[c] = true
 
 	# Build the closest chunks first so the world fills in outward from the player.
 	_build_queue.sort_custom(func(a, b): return _dist2(a, tc) < _dist2(b, tc))
@@ -247,23 +296,42 @@ func _build_ground_mesh(coord: Vector2i) -> Mesh:
 	var seg := chunk_segments
 	var step := chunk_size / float(seg)
 
+	# Sample ONE height grid with a one-vertex apron on every side, so each vertex's
+	# height AND its normal both read from this array instead of re-sampling the
+	# noise ~11x per vertex. Grid width w = seg + 3 (seg+1 vertices + 1 apron each
+	# side); grid cell (gi, gj) maps to world (coord*seg + gi - 1).
+	var w := seg + 3
+	var heights := PackedFloat32Array()
+	heights.resize(w * w)
+	for gj in range(w):
+		for gi in range(w):
+			# Index from the GLOBAL grid so a chunk's edge column lands on EXACTLY the
+			# same float coordinate as the neighbour's — identical heights and normals
+			# on both sides, no seam. (Offsetting i*step from a per-chunk origin instead
+			# leaves a sub-unit float mismatch that shows as a faint grid line.)
+			var gx := (coord.x * seg + gi - 1) * step
+			var gz := (coord.y * seg + gj - 1) * step
+			heights[gj * w + gi] = get_height(gx, gz)
+
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
 	for j in range(seg + 1):
 		for i in range(seg + 1):
-			# Index from the GLOBAL grid (coord*seg + i) rather than off a per-chunk
-			# origin, so a chunk's last edge column lands on EXACTLY the same float
-			# coordinate as the next chunk's first column. The height/biome/normal
-			# samplers then return identical values on both sides — no seam. (Adding
-			# i*step onto a per-chunk origin instead leaves a sub-unit float mismatch
-			# at the edge that shows up as a faint biome-colour grid line.)
 			var x := (coord.x * seg + i) * step
 			var z := (coord.y * seg + j) * step
+			var idx := (j + 1) * w + (i + 1)
+			# Central differences on the grid (spacing = step). Same sign convention
+			# as the old _ground_normal: (h_left - h_right, 2*spacing, h_near - h_far),
+			# so the normal still points up and edge normals stay identical to neighbours.
+			var hxl := heights[idx - 1]      # x - step
+			var hxr := heights[idx + 1]      # x + step
+			var hzn := heights[idx - w]      # z - step
+			var hzf := heights[idx + w]      # z + step
 			st.set_color(Color(get_biome(x, z), 0.0, 0.0, 1.0))
 			st.set_uv(Vector2(float(i), float(j)))
-			st.set_normal(_ground_normal(x, z))
-			st.add_vertex(Vector3(x, get_height(x, z), z))
+			st.set_normal(Vector3(hxl - hxr, 2.0 * step, hzn - hzf).normalized())
+			st.add_vertex(Vector3(x, heights[idx], z))
 
 	var row := seg + 1
 	for j in range(seg):
@@ -284,10 +352,37 @@ func _build_ground_mesh(coord: Vector2i) -> Mesh:
 # -----------------------------------------------------------------------------
 # Props: deterministic per-chunk scatter. Lush chunks favour clustered trees;
 # dry chunks favour rocks. A few bushes everywhere. Nothing is placed in water.
+#
+# Scatter collects per-prop TRANSFORMS (and colours) into a _Scatter buffer, then
+# flushes each prop type into a single MultiMeshInstance3D — so a lush chunk is a
+# handful of draw calls instead of hundreds of nodes. Chalets stay node-built
+# (rare); their split-rail fence joins the MultiMesh path.
 # -----------------------------------------------------------------------------
+
+# Accumulates one chunk's scatter. Transforms are world-space (the chunk root
+# sits at the origin, so local == world). min_y/max_y bound a custom AABB.
+class _Scatter:
+	var trunks: Array[Transform3D] = []
+	var leaves: Array[Transform3D] = []
+	var leaf_colors: PackedColorArray = PackedColorArray()
+	var rocks: Array[Transform3D] = []
+	var bushes: Array[Transform3D] = []
+	var bush_colors: PackedColorArray = PackedColorArray()
+	var posts: Array[Transform3D] = []
+	var rails: Array[Transform3D] = []
+	var tree_positions: PackedVector3Array = PackedVector3Array()
+	var min_y: float = INF
+	var max_y: float = -INF
+
+	func note_y(lo: float, hi: float) -> void:
+		min_y = minf(min_y, lo)
+		max_y = maxf(max_y, hi)
+
+
 func _scatter_props(parent: Node3D, coord: Vector2i) -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = _chunk_seed(coord)
+	var s := _Scatter.new()
 
 	var ox := coord.x * chunk_size
 	var oz := coord.y * chunk_size
@@ -306,16 +401,16 @@ func _scatter_props(parent: Node3D, coord: Vector2i) -> void:
 		for t in n:
 			var angle := rng.randf() * TAU
 			var dist := sqrt(rng.randf()) * 18.0
-			_place_prop(parent, "tree", cx + cos(angle) * dist, cz + sin(angle) * dist, rng)
+			_place_prop(s, "tree", cx + cos(angle) * dist, cz + sin(angle) * dist, rng)
 
 	# Lone trees scattered between the clusters.
 	for t in int(round(rng.randf_range(0.0, 5.0) * tree_lush)):
-		_place_prop(parent, "tree", ox + rng.randf() * chunk_size, oz + rng.randf() * chunk_size, rng)
+		_place_prop(s, "tree", ox + rng.randf() * chunk_size, oz + rng.randf() * chunk_size, rng)
 
 	# Rocks — sparse on lush pasture, common on dry/barren ground.
 	var barren := 1.0 - lush
 	for r in int(round(rng.randf_range(0.0, 3.0) + barren * 6.0)):
-		_place_prop(parent, "rock", ox + rng.randf() * chunk_size, oz + rng.randf() * chunk_size, rng)
+		_place_prop(s, "rock", ox + rng.randf() * chunk_size, oz + rng.randf() * chunk_size, rng)
 
 	# In the most barren chunks, occasionally drop a scree field — a tight cluster
 	# of rocks that reads as a stony patch matching the bare ground texture.
@@ -325,11 +420,11 @@ func _scatter_props(parent: Node3D, coord: Vector2i) -> void:
 		for i in rng.randi_range(4, 9):
 			var a := rng.randf() * TAU
 			var d := sqrt(rng.randf()) * 7.0
-			_place_prop(parent, "rock", sx + cos(a) * d, sz + sin(a) * d, rng)
+			_place_prop(s, "rock", sx + cos(a) * d, sz + sin(a) * d, rng)
 
 	# Bushes sprinkled everywhere to break up the grass.
 	for b in rng.randi_range(0, 4):
-		_place_prop(parent, "bush", ox + rng.randf() * chunk_size, oz + rng.randf() * chunk_size, rng)
+		_place_prop(s, "bush", ox + rng.randf() * chunk_size, oz + rng.randf() * chunk_size, rng)
 
 	# A rare Swiss chalet with its flag — only on gentle meadow ground, never in
 	# water or up among the alpine rock.
@@ -344,27 +439,74 @@ func _scatter_props(parent: Node3D, coord: Vector2i) -> void:
 			chalet.rotation.y = rot
 			parent.add_child(chalet)
 			# The fence is built in world space (each post sampled against the
-			# terrain) so it hugs the slope instead of floating, so it lives on the
-			# chunk rather than under the flat chalet node.
-			_build_fence(parent, hx, hz, rot, rng)
+			# terrain) so it hugs the slope instead of floating.
+			_build_fence(s, hx, hz, rot, rng)
+
+	_flush_scatter(parent, coord, s)
 
 
-# Sit a prop on the terrain at (x, z), skipping anything that would stand in
-# water. Trees join the "trees" group so the minimap and birdsong can find them.
-func _place_prop(parent: Node3D, kind: String, x: float, z: float, rng: RandomNumberGenerator) -> void:
+# Build a prop's world transform at (x, z) — skipping anything that would stand
+# in water — and append its per-part instance transforms to the scatter buffer.
+func _place_prop(s: _Scatter, kind: String, x: float, z: float, rng: RandomNumberGenerator) -> void:
 	var h := get_height(x, z)
 	if h < water_level + 0.6:
 		return
-	var node: Node3D
+	var yaw := rng.randf() * TAU
 	match kind:
-		"tree": node = _make_tree(rng)
-		"rock": node = _make_rock(rng)
-		_:      node = _make_bush(rng)
-	node.position = Vector3(x, h, z)
-	node.rotation.y = rng.randf() * TAU
-	if kind == "tree":
-		node.add_to_group("trees")
-	parent.add_child(node)
+		"tree": _scatter_tree(s, x, h, z, yaw, rng)
+		"rock": _scatter_rock(s, x, h, z, yaw, rng)
+		_:      _scatter_bush(s, x, h, z, yaw, rng)
+
+
+# Turn the collected transforms into one MultiMeshInstance3D per prop type.
+func _flush_scatter(parent: Node3D, coord: Vector2i, s: _Scatter) -> void:
+	# The whole MultiMesh is culled as one unit against this AABB (there is no
+	# per-instance culling), so set it to the chunk column with headroom: vertical
+	# room for the tallest scaled tree / sunk posts, and a horizontal margin for
+	# props whose foliage overhangs the chunk edge (so an overhanging prop is never
+	# culled with the chunk). Set explicitly to skip the engine's AABB recompute.
+	const MARGIN := 4.0
+	var aabb := AABB(
+		Vector3(coord.x * chunk_size - MARGIN, s.min_y - 2.0, coord.y * chunk_size - MARGIN),
+		Vector3(chunk_size + 2.0 * MARGIN, (s.max_y - s.min_y) + 20.0, chunk_size + 2.0 * MARGIN))
+	var no_colors := PackedColorArray()
+	_add_multimesh(parent, _trunk_mesh, _trunk_mat, s.trunks, no_colors, aabb)
+	_add_multimesh(parent, _leaf_mesh, _leaf_mat, s.leaves, s.leaf_colors, aabb)
+	_add_multimesh(parent, _rock_lump_mesh, _rock_mat, s.rocks, no_colors, aabb)
+	_add_multimesh(parent, _bush_blob_mesh, _bush_mat, s.bushes, s.bush_colors, aabb)
+	_add_multimesh(parent, _post_mesh, _fence_mat, s.posts, no_colors, aabb)
+	_add_multimesh(parent, _rail_mesh, _fence_mat, s.rails, no_colors, aabb)
+	_tree_positions[coord] = s.tree_positions   # for the minimap radar
+
+
+# Create a MultiMeshInstance3D for one prop type, if any instances were placed.
+# `colors` empty => no per-instance colour (a solid shared material).
+func _add_multimesh(parent: Node3D, mesh: Mesh, mat: Material,
+		xforms: Array[Transform3D], colors: PackedColorArray, aabb: AABB) -> void:
+	if xforms.is_empty():
+		return
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	var use_col := not colors.is_empty()
+	if use_col:
+		mm.use_colors = true          # must be set while instance_count is still 0
+	mm.mesh = mesh
+	mm.instance_count = xforms.size() # allocates/clears the buffer — set exactly once
+	for i in xforms.size():
+		mm.set_instance_transform(i, xforms[i])
+		if use_col:
+			mm.set_instance_color(i, colors[i])
+	mm.custom_aabb = aabb
+	var inst := MultiMeshInstance3D.new()
+	inst.multimesh = mm
+	inst.material_override = mat
+	parent.add_child(inst)
+
+
+# World-space tree positions of every loaded chunk, for the minimap radar (trees
+# are MultiMesh instances now, not nodes, so they aren't in a scene group).
+func get_tree_position_chunks() -> Array:
+	return _tree_positions.values()
 
 
 # A stable seed for one chunk, mixing the chunk coords with the world seed so
@@ -376,73 +518,48 @@ func _chunk_seed(coord: Vector2i) -> int:
 
 
 # -----------------------------------------------------------------------------
-# Prop builders (deterministic — they draw all randomness from the passed rng).
+# Prop scatterers (deterministic — they draw all randomness from the passed rng).
+# Each appends per-part instance transforms (matching the old node hierarchies'
+# parent x child composition) to the scatter buffer.
 # -----------------------------------------------------------------------------
-func _make_tree(rng: RandomNumberGenerator) -> Node3D:
-	var tree := Node3D.new()
-	tree.name = "Tree"
-	tree.scale = Vector3.ONE * rng.randf_range(0.8, 1.5)
 
-	var trunk_mesh := CylinderMesh.new()
-	trunk_mesh.top_radius = 0.3
-	trunk_mesh.bottom_radius = 0.4
-	trunk_mesh.height = 2.5
-	var trunk := MeshInstance3D.new()
-	trunk.mesh = trunk_mesh
-	trunk.material_override = _trunk_mat
-	trunk.position.y = 1.25
-	tree.add_child(trunk)
-
+# A tree: a trunk cylinder plus a foliage cone, both riding a base transform that
+# carries the tree's yaw and a uniform 0.8..1.5 size (as the old root node did).
+func _scatter_tree(s: _Scatter, x: float, h: float, z: float, yaw: float, rng: RandomNumberGenerator) -> void:
+	var scl := rng.randf_range(0.8, 1.5)
 	var green := Color(0.16, 0.42, 0.18).lerp(Color(0.22, 0.50, 0.20), rng.randf())
-	var leaves_mesh := CylinderMesh.new()
-	leaves_mesh.top_radius = 0.0
-	leaves_mesh.bottom_radius = 2.0
-	leaves_mesh.height = 4.0
-	var leaves := MeshInstance3D.new()
-	leaves.mesh = leaves_mesh
-	leaves.material_override = _solid_material(green)
-	leaves.position.y = 4.5
-	tree.add_child(leaves)
-
-	return tree
+	var base := Transform3D(Basis(Vector3.UP, yaw) * Basis.from_scale(Vector3.ONE * scl), Vector3(x, h, z))
+	s.trunks.append(base * Transform3D(Basis.IDENTITY, Vector3(0.0, 1.25, 0.0)))
+	s.leaves.append(base * Transform3D(Basis.IDENTITY, Vector3(0.0, 4.5, 0.0)))
+	s.leaf_colors.append(green)
+	s.tree_positions.append(Vector3(x, h, z))
+	s.note_y(h, h + 6.5 * scl)   # cone top sits at local y = 4.5 + 2.0
 
 
-# A rock: two or three squashed, overlapping grey spheres so it reads as a
-# lumpy boulder rather than a clean ball.
-func _make_rock(rng: RandomNumberGenerator) -> Node3D:
-	var rock := Node3D.new()
-	rock.name = "Rock"
+# A rock: two or three squashed, overlapping grey spheres so it reads as a lumpy
+# boulder rather than a clean ball. Per-lump radius/squash rides in the scale.
+func _scatter_rock(s: _Scatter, x: float, h: float, z: float, yaw: float, rng: RandomNumberGenerator) -> void:
+	var root := Transform3D(Basis(Vector3.UP, yaw), Vector3(x, h, z))
 	var lumps := rng.randi_range(2, 3)
 	for i in lumps:
-		var s := SphereMesh.new()
-		s.radius = rng.randf_range(0.5, 1.1)
-		s.height = s.radius * 2.0
-		var inst := MeshInstance3D.new()
-		inst.mesh = s
-		inst.material_override = _rock_mat
-		inst.position = Vector3(rng.randf_range(-0.5, 0.5), rng.randf_range(0.1, 0.4), rng.randf_range(-0.5, 0.5))
-		inst.scale = Vector3(rng.randf_range(0.9, 1.3), rng.randf_range(0.6, 0.9), rng.randf_range(0.9, 1.3))
-		rock.add_child(inst)
-	return rock
+		var r := rng.randf_range(0.5, 1.1)
+		var off := Vector3(rng.randf_range(-0.5, 0.5), rng.randf_range(0.1, 0.4), rng.randf_range(-0.5, 0.5))
+		var squash := Vector3(rng.randf_range(0.9, 1.3), rng.randf_range(0.6, 0.9), rng.randf_range(0.9, 1.3))
+		s.rocks.append(root * Transform3D(Basis.from_scale(Vector3(r, r, r) * squash), off))
+	s.note_y(h, h + 1.5)
 
 
-# A bush: a small clump of green spheres.
-func _make_bush(rng: RandomNumberGenerator) -> Node3D:
-	var bush := Node3D.new()
-	bush.name = "Bush"
+# A bush: a small clump of green spheres sharing one per-bush green.
+func _scatter_bush(s: _Scatter, x: float, h: float, z: float, yaw: float, rng: RandomNumberGenerator) -> void:
 	var green := Color(0.18, 0.38, 0.16).lerp(Color(0.26, 0.46, 0.20), rng.randf())
-	var mat := _solid_material(green)
+	var root := Transform3D(Basis(Vector3.UP, yaw), Vector3(x, h, z))
 	var blobs := rng.randi_range(2, 4)
 	for i in blobs:
-		var s := SphereMesh.new()
-		s.radius = rng.randf_range(0.35, 0.6)
-		s.height = s.radius * 2.0
-		var inst := MeshInstance3D.new()
-		inst.mesh = s
-		inst.material_override = mat
-		inst.position = Vector3(rng.randf_range(-0.4, 0.4), rng.randf_range(0.3, 0.6), rng.randf_range(-0.4, 0.4))
-		bush.add_child(inst)
-	return bush
+		var r := rng.randf_range(0.35, 0.6)
+		var off := Vector3(rng.randf_range(-0.4, 0.4), rng.randf_range(0.3, 0.6), rng.randf_range(-0.4, 0.4))
+		s.bushes.append(root * Transform3D(Basis.from_scale(Vector3.ONE * r), off))
+		s.bush_colors.append(green)
+	s.note_y(h, h + 1.2)
 
 
 # A Valais-style Swiss chalet (see chalet.jpg): dark weathered-timber walls on a
@@ -610,19 +727,17 @@ func _make_window(rng: RandomNumberGenerator) -> Node3D:
 # sampled against the terrain so the fence hugs the slope, and the rails tilt to
 # join neighbouring post tops instead of floating flat. Purely cosmetic — props
 # carry no collision. (ox, oz) is the chalet's world position; rot its yaw.
-func _build_fence(parent: Node3D, ox: float, oz: float, rot: float, _rng: RandomNumberGenerator) -> void:
-	var mat := _solid_material(Color(0.40, 0.29, 0.19))
-
+func _build_fence(s: _Scatter, ox: float, oz: float, rot: float, _rng: RandomNumberGenerator) -> void:
 	const HX := 7.5    # half-extents of the yard (chalet-local)
 	const HZ := 6.5
 	const GATE := 1.4  # half-width of the front gate opening
 
 	# Five straight runs in chalet-local XZ; the front (+Z) is split around the gate.
-	_fence_run(parent, mat, ox, oz, rot, Vector2(-HX, HZ), Vector2(-GATE, HZ))   # front-left
-	_fence_run(parent, mat, ox, oz, rot, Vector2(GATE, HZ), Vector2(HX, HZ))     # front-right
-	_fence_run(parent, mat, ox, oz, rot, Vector2(-HX, -HZ), Vector2(HX, -HZ))    # back
-	_fence_run(parent, mat, ox, oz, rot, Vector2(-HX, -HZ), Vector2(-HX, HZ))    # left
-	_fence_run(parent, mat, ox, oz, rot, Vector2(HX, -HZ), Vector2(HX, HZ))      # right
+	_fence_run(s, ox, oz, rot, Vector2(-HX, HZ), Vector2(-GATE, HZ))   # front-left
+	_fence_run(s, ox, oz, rot, Vector2(GATE, HZ), Vector2(HX, HZ))     # front-right
+	_fence_run(s, ox, oz, rot, Vector2(-HX, -HZ), Vector2(HX, -HZ))    # back
+	_fence_run(s, ox, oz, rot, Vector2(-HX, -HZ), Vector2(-HX, HZ))    # left
+	_fence_run(s, ox, oz, rot, Vector2(HX, -HZ), Vector2(HX, HZ))      # right
 
 
 # Turn a chalet-local XZ offset into a world XZ point (yaw rotation + translation).
@@ -635,8 +750,7 @@ func _fence_world(ox: float, oz: float, rot: float, local: Vector2) -> Vector2:
 # Build one straight fence run between two chalet-local points: evenly spaced
 # posts, each dropped onto the terrain, joined by two rails that tilt to follow
 # the ground between consecutive posts.
-func _fence_run(parent: Node3D, mat: StandardMaterial3D, ox: float, oz: float, rot: float,
-		a: Vector2, b: Vector2) -> void:
+func _fence_run(s: _Scatter, ox: float, oz: float, rot: float, a: Vector2, b: Vector2) -> void:
 	var spans := int(max(1, round((b - a).length() / 2.4)))
 
 	# Sample each post's world position + terrain height along the run.
@@ -648,27 +762,17 @@ func _fence_run(parent: Node3D, mat: StandardMaterial3D, ox: float, oz: float, r
 
 	# Posts: stand each one at its sampled height, sunk a little into the ground.
 	for p in pts:
-		var post := MeshInstance3D.new()
-		var post_mesh := BoxMesh.new()
-		post_mesh.size = Vector3(0.16, 1.5, 0.16)
-		post.mesh = post_mesh
-		post.material_override = mat
-		post.position = p + Vector3(0.0, 0.45, 0.0)   # top ~1.2 above ground, base sunk ~0.3
-		post.rotation.y = rot
-		parent.add_child(post)
+		s.posts.append(Transform3D(Basis(Vector3.UP, rot), p + Vector3(0.0, 0.45, 0.0)))
+		s.note_y(p.y, p.y + 1.2)   # top ~1.2 above ground, base sunk ~0.3
 
 	# Rails: one segment per post gap, tilted to connect the two post tops so the
-	# rail follows the slope instead of cutting through or floating over it.
+	# rail follows the slope instead of cutting through or floating over it. The
+	# canonical rail mesh is unit-length in X, so we scale its X axis to the span.
 	for ry in [0.55, 1.0]:
 		for i in spans:
 			var p0 := pts[i] + Vector3(0.0, ry, 0.0)
 			var p1 := pts[i + 1] + Vector3(0.0, ry, 0.0)
 			var seg := p1 - p0
-			var rail := MeshInstance3D.new()
-			var rail_mesh := BoxMesh.new()
-			rail_mesh.size = Vector3(seg.length(), 0.12, 0.08)
-			rail.mesh = rail_mesh
-			rail.material_override = mat
 			# Orient the rail's local +X axis along the segment (handles both the
 			# horizontal heading and the up/down pitch of the slope).
 			var x_axis := seg.normalized()
@@ -677,8 +781,7 @@ func _fence_run(parent: Node3D, mat: StandardMaterial3D, ox: float, oz: float, r
 				z_axis = Vector3.FORWARD   # degenerate: perfectly vertical segment
 			z_axis = z_axis.normalized()
 			var y_axis := z_axis.cross(x_axis).normalized()
-			rail.transform = Transform3D(Basis(x_axis, y_axis, z_axis), (p0 + p1) * 0.5)
-			parent.add_child(rail)
+			s.rails.append(Transform3D(Basis(x_axis * seg.length(), y_axis, z_axis), (p0 + p1) * 0.5))
 
 
 # A small Swiss flag (red field with a white cross) on a slim pole.
@@ -760,6 +863,17 @@ func _build_water() -> void:
 func _solid_material(color: Color) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
+	return mat
+
+
+# A material whose albedo comes from the per-instance MultiMesh colour. Albedo is
+# left pure white (the instance colour MULTIPLIES it), and vertex_color_is_srgb
+# makes those colours read identically to the old per-prop albedo_color path.
+func _vertex_color_material() -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(1.0, 1.0, 1.0)
+	mat.vertex_color_use_as_albedo = true
+	mat.vertex_color_is_srgb = true
 	return mat
 
 

@@ -37,6 +37,10 @@ var _bird_stream: AudioStreamWAV
 var _bird_emitters: Array[AudioStreamPlayer3D] = []
 var _bird_countdown := 2.0
 
+# Supplied by the World: the player saucer, cached so the whistle doesn't scan the
+# "saucer" group every frame just to read beam_active.
+var saucer: Saucer = null
+
 
 func _ready() -> void:
 	moo_stream = render_moo(RATE)
@@ -90,7 +94,6 @@ func _tick_birds(delta: float) -> void:
 	_bird_countdown -= delta
 	if _bird_countdown <= 0.0:
 		var emitter := _bird_emitters[randi() % _bird_emitters.size()]
-		var saucer := get_tree().get_first_node_in_group("saucer") as Saucer
 		if saucer != null:
 			var angle := randf() * TAU
 			var dist := randf_range(20.0, 70.0)
@@ -107,7 +110,6 @@ func _fill_whistle() -> void:
 		return
 
 	# Pitch climbs while the tractor beam is firing.
-	var saucer := get_tree().get_first_node_in_group("saucer") as Saucer
 	var beaming := saucer != null and saucer.beam_active
 	var target := 780.0 if beaming else 520.0
 	_cur_freq = lerp(_cur_freq, target, 0.08)

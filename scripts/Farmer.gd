@@ -34,6 +34,9 @@ extends Node3D
 # water level, so the World can stand him on dry ground (he never moves himself).
 var ground_sampler: Callable
 var water_level: float = -1000.0
+# Supplied by the World: the player saucer (session singleton), cached so the
+# farmer doesn't scan the "saucer" group every physics frame.
+var saucer: Saucer = null
 
 # The shoulder pivot that the arms + rifle hang from; pitched up to aim.
 var _aim: Node3D
@@ -54,8 +57,7 @@ func _ready() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	var saucer := get_tree().get_first_node_in_group("saucer") as Saucer
-	if saucer == null:
+	if saucer == null or not is_instance_valid(saucer):
 		return
 
 	var d := saucer.global_position - global_position
@@ -143,8 +145,12 @@ func _spawn_bullet(from: Vector3, to: Vector3, hit: bool, saucer: Saucer) -> voi
 	var tw := inst.create_tween()
 	tw.tween_property(inst, "global_position", to, travel)
 	if hit:
-		# Jolt the saucer at the instant of impact, not when the trigger is pulled.
-		tw.tween_callback(saucer.register_hit.bind(global_position))
+		# Jolt the saucer at the instant of impact, not when the trigger is pulled —
+		# and only if it still exists by the time the slug arrives.
+		var shot_from := global_position
+		tw.tween_callback(func() -> void:
+			if is_instance_valid(saucer):
+				saucer.register_hit(shot_from))
 	tw.tween_callback(inst.queue_free)
 
 

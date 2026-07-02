@@ -17,6 +17,11 @@ extends Control
 
 @export var view_range: float = 110.0   # world metres from edge-to-centre of the radar
 
+# Injected by World: the player (session singleton) and the terrain (its tree
+# positions), so the radar doesn't re-scan groups every frame.
+var saucer: Saucer = null
+var terrain: Terrain = null
+
 # Colours.
 const BG_COLOR := Color(0.05, 0.08, 0.06, 0.55)
 const BORDER_COLOR := Color(0.6, 1.0, 0.7, 0.8)
@@ -39,20 +44,20 @@ func _draw() -> void:
 	draw_circle(center, radius, BG_COLOR)
 	draw_arc(center, radius, 0.0, TAU, 48, BORDER_COLOR, 2.0)
 
-	# Cast to Saucer so its properties (global_position, beam_active, beam_radius,
-	# get_planar_forward) are statically typed and resolvable.
-	var saucer := get_tree().get_first_node_in_group("saucer") as Saucer
 	if saucer == null:
 		return
 
 	var origin := saucer.global_position
 	var map_scale := radius / view_range   # world metres -> radar pixels
 
-	# Trees first (so cows draw on top of them).
-	for tree in get_tree().get_nodes_in_group("trees"):
-		var p := _world_to_map(tree.global_position, origin, map_scale, center)
-		if p.distance_to(center) <= radius:
-			draw_circle(p, 1.5, TREE_COLOR)
+	# Trees first (so cows draw on top of them). Positions come from the terrain's
+	# per-chunk registry now that trees are MultiMesh instances, not scene nodes.
+	if terrain != null:
+		for chunk_trees in terrain.get_tree_position_chunks():
+			for tpos in chunk_trees:
+				var p := _world_to_map(tpos, origin, map_scale, center)
+				if p.distance_to(center) <= radius:
+					draw_circle(p, 1.5, TREE_COLOR)
 
 	# Cows: clamp stragglers to the rim so the player always sees a bearing.
 	for cow in get_tree().get_nodes_in_group("cows"):
